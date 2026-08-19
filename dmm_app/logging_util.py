@@ -17,10 +17,15 @@ class CsvLogger:
             self._writer.writerow(
                 [
                     "timestamp",
+                    "elapsed_seconds",
+                    "acquisition_run",
+                    "instrument_window",
                     "measurement_slot",
                     "device_name",
+                    "connection",
                     "device_idn",
                     "function",
+                    "source",
                     "value",
                     "unit",
                     "raw_response",
@@ -35,11 +40,16 @@ class CsvLogger:
     def write_reading(self, reading: Reading) -> None:
         self._writer.writerow(
             [
-                reading.timestamp.isoformat(timespec="seconds"),
-                reading.slot_index + 1,
+                reading.timestamp.isoformat(timespec="microseconds"),
+                f"{reading.elapsed_seconds:.9f}",
+                reading.acquisition_run,
+                reading.instrument_index + 1,
+                "" if reading.slot_index < 0 else reading.slot_index + 1,
                 reading.instrument.value,
+                reading.connection,
                 reading.device_idn,
                 reading.function.value,
+                reading.source,
                 "" if reading.value is None else f"{reading.value:.12g}",
                 reading.unit,
                 reading.raw_response,

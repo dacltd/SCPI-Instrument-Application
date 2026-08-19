@@ -62,7 +62,7 @@ Adding new functions becomes additive and low risk (new map entry plus UI exposu
 
 ## 2026-02-11 - CSV logging with opt-in checkbox and file prompt
 ### Decision
-Enable logging through an explicit checkbox; prompt for file destination when enabled; write CSV rows per reading.
+Give each instrument panel an explicit logging checkbox, retain a shared all-instruments override, prompt for a file destination when either is enabled, and write selected readings to one CSV.
 
 ### Why
 Matches lab workflow expectations and keeps logging behavior explicit and auditable.
@@ -72,7 +72,7 @@ Matches lab workflow expectations and keeps logging behavior explicit and audita
 - Database-backed logging from first release.
 
 ### Consequences
-- Pros: simple, transparent, and broadly compatible.
+- Pros: simple, transparent, selective per instrument, and broadly compatible.
 - Cons: no built-in query/index capabilities beyond CSV tools.
 
 ## 2026-02-11 - Runtime identity verification
@@ -134,3 +134,59 @@ OWON can read both voltage and current via separate SCPI queries in one cycle, w
 ### Consequences
 - Pros: aligns UI behavior to instrument capability and minimizes operator error.
 - Cons: adds dynamic row state management and per-cycle batching logic.
+
+## 2026-08-19 - Four-panel acquisition workspace
+### Decision
+Use four independent instrument panels in a fixed 2×2 workspace, with both per-panel controls and coordinated start/stop controls.
+
+### Why
+The primary workflow needs simultaneous DMM, PSU, oscilloscope, and device-under-test serial monitoring without opening separate application processes.
+
+### Consequences
+- Pros: each connection remains isolated while the operator can view and control the complete test setup in one window.
+- Cons: the application needs a larger minimum window and concurrent worker lifecycle management.
+
+## 2026-08-19 - Shared software acquisition clock
+### Decision
+Timestamp every completed read against one application-owned monotonic clock and derive a timezone-aware wall timestamp from that same origin. Coordinated Start All uses a common worker gate and resets elapsed time.
+
+### Why
+This gives all serial, USB, and LAN readings a comparable local timeline without requiring hardware changes.
+
+### Consequences
+- Pros: robust against system clock adjustments and suitable for correlating ordinary lab observations.
+- Cons: timestamps represent response receipt, so transport latency and sequential SCPI query time remain part of the measurement uncertainty. Hardware triggers are a future option if tighter accuracy is required.
+
+## 2026-08-19 - VISA transport and parameterized oscilloscope profile
+### Decision
+Add a common VISA transport for USBTMC/LAN instruments and model DHO804 measurements as function/source pairs.
+
+### Why
+Oscilloscope channels are sources rather than separate instrument profiles, and VISA keeps the transport reusable for other instrument families.
+
+### Consequences
+- Pros: supports discovered or manually entered VISA resources and makes additional channel-based instruments additive.
+- Cons: adds PyVISA/PyVISA-py runtime dependencies and still requires physical hardware validation.
+
+## 2026-08-19 - Lossless DHO804 single-shot waveform capture
+### Decision
+Configure SMPS acquisition through a dedicated oscilloscope setup model, arm a single edge trigger in a worker thread, poll for STOP, and export the RAW WORD bytes with a JSON preamble/metadata sidecar.
+
+### Why
+Moderate RAW records preserve switching-edge detail without blocking the UI or repeatedly transferring the scope's full memory. Keeping setup, identity and timing beside the payload makes captures auditable.
+
+### Consequences
+- Pros: implements repeatable 100 kpoint–25 Mpoint captures and preserves source data without a lossy or undocumented conversion.
+- Cons: trigger-observed timestamps include polling/transport latency, and calibrated voltage conversion remains blocked on physical confirmation of WORD byte order.
+
+## 2026-08-19 - RAW waveform files with CSV manifest rows
+
+### Decision
+Keep large DHO804 waveform arrays in individual RAW WORD `.bin` files with JSON sidecars, and write one correlated summary/path row per capture to the selected shared CSV. Provide repeated waveform capture as an explicit alternative to scalar measurement polling.
+
+### Why
+A 1 Mpoint waveform is about 2 MB, so placing every sample directly in the shared CSV would make it unwieldy and would mix incompatible scalar and array-shaped data. Manifest rows keep cross-instrument timing searchable while preserving each waveform losslessly.
+
+### Consequences
+- Pros: repeated captures are explicit, waveform files remain lossless, and the shared CSV correlates them with other instruments.
+- Cons: a complete run consists of the CSV plus its associated waveform directory, and voltage decoding still requires the JSON preamble and confirmed WORD byte order.
