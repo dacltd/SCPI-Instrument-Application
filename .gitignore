@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 .DS_Store
 
+# Local oscilloscope captures and generated waveform logging output
+dho804_*.bin
+dho804_*.bin.json
+*_waveforms/
+/tests/logging waveforms.csv
