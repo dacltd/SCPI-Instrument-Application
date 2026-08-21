@@ -62,7 +62,7 @@ Adding new functions becomes additive and low risk (new map entry plus UI exposu
 
 ## 2026-02-11 - CSV logging with opt-in checkbox and file prompt
 ### Decision
-Give each instrument panel an explicit logging checkbox, retain a shared all-instruments override, prompt for a file destination when either is enabled, and write selected readings to one CSV.
+Give each instrument panel an explicit logging checkbox, retain a shared all-instruments override, prompt for a file destination when either is enabled, and write selected readings to one CSV. This routing behaviour was superseded by the 2026-08-20 decision below; the per-panel opt-in remains.
 
 ### Why
 Matches lab workflow expectations and keeps logging behavior explicit and auditable.
@@ -177,16 +177,97 @@ Moderate RAW records preserve switching-edge detail without blocking the UI or r
 
 ### Consequences
 - Pros: implements repeatable 100 kpoint–25 Mpoint captures and preserves source data without a lossy or undocumented conversion.
-- Cons: trigger-observed timestamps include polling/transport latency, and calibrated voltage conversion remains blocked on physical confirmation of WORD byte order.
+- Cons: trigger-observed timestamps include polling/transport latency; little-endian voltage conversion is hardware-validated for DHO804 firmware `00.01.03` and must be rechecked if a future firmware behaves differently.
 
 ## 2026-08-19 - RAW waveform files with CSV manifest rows
 
 ### Decision
-Keep large DHO804 waveform arrays in individual RAW WORD `.bin` files with JSON sidecars, and write one correlated summary/path row per capture to the selected shared CSV. Provide repeated waveform capture as an explicit alternative to scalar measurement polling.
+Keep large DHO804 waveform arrays in individual RAW WORD `.bin` files with JSON sidecars, and write one correlated summary/path row per capture to the panel's selected shared or individual CSV. Provide repeated waveform capture as an explicit alternative to scalar measurement polling.
 
 ### Why
-A 1 Mpoint waveform is about 2 MB, so placing every sample directly in the shared CSV would make it unwieldy and would mix incompatible scalar and array-shaped data. Manifest rows keep cross-instrument timing searchable while preserving each waveform losslessly.
+A 1 Mpoint waveform is about 2 MB, so placing every sample directly in a CSV would make it unwieldy and would mix incompatible scalar and array-shaped data. Manifest rows keep timing searchable while preserving each waveform losslessly.
 
 ### Consequences
-- Pros: repeated captures are explicit, waveform files remain lossless, and the shared CSV correlates them with other instruments.
-- Cons: a complete run consists of the CSV plus its associated waveform directory, and voltage decoding still requires the JSON preamble and confirmed WORD byte order.
+- Pros: repeated captures are explicit, waveform files remain lossless, and shared mode can correlate them with selected instruments while individual mode can keep runs separate.
+- Cons: a complete run consists of the CSV plus its associated waveform directory, and voltage decoding still requires the JSON preamble.
+
+## 2026-08-19 - Per-panel text and graph views
+
+### Decision
+Give every instrument panel a Text/Graph output toggle. Plot at most two scalar measurement rows against shared elapsed time with independent left/right Y axes, and plot the latest DHO804 RAW waveform using its preamble and applied scope divisions.
+
+### Why
+Operators need to see trends without exporting the CSV, while voltage/current pairs require independent scales. Oscilloscope records need calibrated time/voltage presentation without placing a million samples in the UI or CSV.
+
+### Consequences
+- Pros: live DMM/PSU trends, readable dual-unit OWON plots, and immediate visual verification of saved scope captures without extra plotting dependencies.
+- Cons: only the first two scalar rows are graphed, graph view temporarily collapses controls for space, and the initial scope view shows the latest capture rather than persistence across many captures.
+
+## 2026-08-19 - Recoverable IEEE transfers and fresh-data indication
+
+### Decision
+Treat malformed, empty, and interrupted IEEE waveform blocks as recoverable during repeated RAW logging. Clear or reopen the VISA session, restore the DHO804 RAW transfer commands, and retry, but stop after three consecutive failures. Show a flashing red graph dot only while an active stream has delivered fresh data.
+
+### Why
+Large scope transfers can fail transiently without meaning that the instrument has disconnected. Stopping on the first bad block loses useful unattended logging time, while continuing indefinitely would hide a persistent fault. Connection state alone also cannot tell an operator whether new results are actually arriving.
+
+### Consequences
+- Pros: isolated transfer faults recover automatically, persistent faults remain visible and bounded, and Graph view gives immediate feedback about real data flow.
+- Cons: each recovery adds a capture gap, the failed record cannot be reconstructed, and the freshness timeout is an application-level indication rather than proof of the instrument's internal acquisition state.
+
+## 2026-08-19 - Do not rediscover VISA during active acquisition
+
+### Decision
+Cache serial and VISA endpoint lists after explicit discovery. Profile changes populate their panel from that cache, and refresh requests defer VISA discovery while any VISA worker is active.
+
+### Why
+Opening a second VISA resource manager for discovery can disturb an in-progress USBTMC binary response. Panel configuration must remain independent from acquisition already running in another panel.
+
+### Consequences
+- Pros: adding or changing an instrument profile cannot corrupt an oscilloscope stream, and explicit refresh remains safe during capture.
+- Cons: newly connected VISA devices will not appear until active VISA acquisition is stopped and discovery is refreshed.
+
+## 2026-08-19 - Modeless DHO804 tools and staged burst validation
+
+### Decision
+Place waveform-record diagnostics and expert SCPI access in a separate modeless DHO804 Tools window instead of expanding the four-panel workspace. Automate a bounded record/replay test that saves and hashes every selected RAW frame, but do not expose waveform recording as a production logging mode until the physical DHO804 proves that replay selection, timestamps and full RAW export work together.
+
+### Why
+The main panel already contains the controls needed during ordinary acquisition, while frame tables and command history need substantially more space. The programming guide documents recording and replay commands but does not explicitly guarantee that `:WAVeform:DATA?` returns the currently selected replay frame in RAW mode.
+
+### Consequences
+- Pros: physical capability testing is repeatable and auditable, advanced controls do not clutter normal operation, and the console remains useful for future firmware investigation.
+- Pros: tools and acquisition share one locked SCPI client, preventing a second VISA session or interleaved responses from corrupting binary transfers.
+- Cons: production burst logging remains explicitly gated on bench results, and state-changing tool operations require the normal scope setup to be reapplied.
+
+## 2026-08-20 - Shared CSV is a destination mode, not a log-all override
+
+### Decision
+
+Make each panel's `Log this instrument` checkbox the sole participation control. When `Use shared CSV` is enabled, all opted-in panels write to one selected file without further filename prompts. When it is disabled, opting in a panel asks for that panel's individual CSV. Turning off active shared mode requires confirmation and unticks every participating panel so no instrument is silently redirected to an old or implicit individual destination.
+
+### Why
+
+Operators may need to monitor connected instruments that should not become part of the recorded dataset. Participation and destination are separate choices: a panel checkbox answers whether to log, while shared mode answers where the selected panels log.
+
+### Consequences
+
+- Pros: monitored-only instruments remain excluded, shared runs require only one filename, and independent runs have explicit per-panel destinations.
+- Pros: cancelling the shared-mode exit preserves the active configuration; accepting it produces a clear no-logging state before individual files are selected.
+- Cons: switching from shared to individual mode deliberately requires re-enabling and assigning each desired panel.
+
+## 2026-08-20 - Versioned JSON workspace configurations load into a safe idle state
+
+### Decision
+
+Provide top-level `Save config…` and `Load config…` actions for a versioned JSON document covering all four panels and logging routing. Require every instrument to be disconnected and idle before load. Restore reusable UI settings but never restore connection/acquisition state, readings, waveform data, DHO804 safety acknowledgement, or the claim that scope settings have already been applied.
+
+### Why
+
+Bench arrangements are repeatedly reused and manually rebuilding profiles, measurement rows and detailed oscilloscope controls is slow and error-prone. Connection and safety state describe the present physical bench, however, so treating yesterday's saved state as proof of today's wiring would be unsafe.
+
+### Consequences
+
+- Pros: repeatable setups, human-readable files, explicit schema versioning and validation before mutation.
+- Pros: manually entered VISA/serial endpoints remain reusable even when discovery does not currently find the device.
+- Cons: operators must reconnect devices and re-verify/apply DHO804 settings after every load.

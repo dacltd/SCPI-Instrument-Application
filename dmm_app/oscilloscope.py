@@ -11,7 +11,7 @@ from typing import Callable
 
 from dmm_app.clock import AcquisitionClock
 from dmm_app.models import InstrumentType, MeasurementFunction, Reading
-from dmm_app.scpi import SCPIClient
+from dmm_app.scpi import IEEEBinaryBlockError, SCPIClient
 
 
 DHO804_MEMORY_POINTS = {
@@ -26,6 +26,7 @@ LOGGING_FIDELITY_SAMPLES_PER_CYCLE = {
     "coverage": 100.0,
     "balanced": 250.0,
 }
+MAX_CONSECUTIVE_IEEE_FAILURES = 3
 
 
 @dataclass(frozen=True)
@@ -291,7 +292,15 @@ def _capture_raw_waveform(
     payload = scpi.query_binary_block(":WAVeform:DATA?")
     transfer_seconds = time.monotonic() - transfer_started
     if len(payload) % 2:
-        raise ValueError(f"WORD waveform payload has an odd byte count ({len(payload):,}).")
+        raise IEEEBinaryBlockError(
+            f"WORD waveform payload has an odd byte count ({len(payload):,})."
+        )
+    received_points = len(payload) // 2
+    if received_points != preamble.points:
+        raise IEEEBinaryBlockError(
+            f"WORD waveform contains {received_points:,} points; "
+            f"the preamble announced {preamble.points:,}."
+        )
     return _CapturedWaveform(
         timestamp=timestamp,
         elapsed_seconds=elapsed_seconds,
@@ -304,6 +313,20 @@ def _capture_raw_waveform(
         preamble_query_seconds=preamble_query_seconds,
         transfer_seconds=transfer_seconds,
     )
+
+
+def _recover_waveform_transfer(scpi: SCPIClient, setup: OscilloscopeSetup) -> None:
+    """Resynchronise VISA and restore the DHO RAW transfer settings after a bad block."""
+    scpi.recover_binary_transfer()
+    for command in (
+        ":STOP",
+        f":WAVeform:SOURce {setup.source}",
+        ":WAVeform:MODE RAW",
+        ":WAVeform:FORMat WORD",
+        ":WAVeform:STARt 1",
+        f":WAVeform:STOP {setup.waveform_points}",
+    ):
+        scpi.write(command)
 
 
 def _save_raw_waveform(
@@ -340,7 +363,7 @@ def _save_raw_waveform(
         "raw_word_file": str(output_path),
         "raw_bytes": len(capture.payload),
         "word_points_received": received_points,
-        "word_byte_order": "not specified by DHO800/DHO900 programming guide",
+        "word_byte_order": "little-endian (validated on DHO804 firmware 00.01.03)",
         "timing": {
             "trigger_wait_seconds": (
                 capture.stop_observed_monotonic - capture.arm_monotonic
@@ -417,6 +440,7 @@ class WaveformCaptureWorker(threading.Thread):
         on_reading: Callable[[Reading], None],
         on_complete: Callable[[str], None],
         on_error: Callable[[str], None],
+        on_warning: Callable[[str], None] | None = None,
     ):
         super().__init__(daemon=True)
         self._scpi = scpi
@@ -429,6 +453,7 @@ class WaveformCaptureWorker(threading.Thread):
         self._on_reading = on_reading
         self._on_complete = on_complete
         self._on_error = on_error
+        self._on_warning = on_warning
         self._stop_event = threading.Event()
 
     def stop(self) -> None:
@@ -436,12 +461,30 @@ class WaveformCaptureWorker(threading.Thread):
 
     def run(self) -> None:
         try:
-            capture = _capture_raw_waveform(
-                self._scpi,
-                self._clock,
-                self._setup,
-                self._stop_event,
-            )
+            capture = None
+            for failure_count in range(1, MAX_CONSECUTIVE_IEEE_FAILURES + 1):
+                try:
+                    capture = _capture_raw_waveform(
+                        self._scpi,
+                        self._clock,
+                        self._setup,
+                        self._stop_event,
+                    )
+                    break
+                except IEEEBinaryBlockError as exc:
+                    if failure_count >= MAX_CONSECUTIVE_IEEE_FAILURES:
+                        raise RuntimeError(
+                            "Waveform transfer failed "
+                            f"{failure_count} consecutive times; capture stopped. "
+                            f"Last IEEE error: {exc}"
+                        ) from exc
+                    if self._on_warning is not None:
+                        self._on_warning(
+                            "IEEE waveform transfer failed; clearing the VISA stream and retrying "
+                            f"({failure_count}/{MAX_CONSECUTIVE_IEEE_FAILURES}). {exc}"
+                        )
+                    _recover_waveform_transfer(self._scpi, self._setup)
+                    self._stop_event.wait(0.2)
             if capture is None:
                 return
             reading, _progress = _save_raw_waveform(
@@ -478,6 +521,7 @@ class RepeatedWaveformCaptureWorker(threading.Thread):
         on_complete: Callable[[str], None],
         on_error: Callable[[str], None],
         on_progress: Callable[[WaveformCaptureProgress], None] | None = None,
+        on_warning: Callable[[str], None] | None = None,
         start_gate: threading.Event | None = None,
     ):
         super().__init__(daemon=True)
@@ -493,6 +537,7 @@ class RepeatedWaveformCaptureWorker(threading.Thread):
         self._on_complete = on_complete
         self._on_error = on_error
         self._on_progress = on_progress
+        self._on_warning = on_warning
         self._start_gate = start_gate
         self._stop_event = threading.Event()
 
@@ -539,17 +584,37 @@ class RepeatedWaveformCaptureWorker(threading.Thread):
                 self._start_gate.wait()
             cached_preamble: WaveformPreamble | None = None
             previous_arm_monotonic: float | None = None
+            consecutive_ieee_failures = 0
             while not self._stop_event.is_set():
                 started = time.monotonic()
-                capture = _capture_raw_waveform(
-                    self._scpi,
-                    self._clock,
-                    self._setup,
-                    self._stop_event,
-                    cached_preamble=cached_preamble,
-                )
+                try:
+                    capture = _capture_raw_waveform(
+                        self._scpi,
+                        self._clock,
+                        self._setup,
+                        self._stop_event,
+                        cached_preamble=cached_preamble,
+                    )
+                except IEEEBinaryBlockError as exc:
+                    consecutive_ieee_failures += 1
+                    if consecutive_ieee_failures >= MAX_CONSECUTIVE_IEEE_FAILURES:
+                        raise RuntimeError(
+                            "Waveform transfer failed "
+                            f"{consecutive_ieee_failures} consecutive times; acquisition stopped. "
+                            f"Last IEEE error: {exc}"
+                        ) from exc
+                    if self._on_warning is not None:
+                        self._on_warning(
+                            "IEEE waveform transfer failed; clearing the VISA stream and retrying "
+                            f"({consecutive_ieee_failures}/{MAX_CONSECUTIVE_IEEE_FAILURES}). {exc}"
+                        )
+                    _recover_waveform_transfer(self._scpi, self._setup)
+                    cached_preamble = None
+                    self._stop_event.wait(0.2)
+                    continue
                 if capture is None:
                     break
+                consecutive_ieee_failures = 0
                 cached_preamble = capture.preamble
                 capture_count += 1
                 source = self._setup.source.lower().replace("channel", "ch")

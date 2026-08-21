@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import queue
 import threading
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QStackedWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -36,6 +38,7 @@ from dmm_app.models import (
     VisaSettings,
 )
 from dmm_app.poller import PollRequest, PollingWorker, RawSerialWorker, parse_primary_value
+from dmm_app.plotting import InstrumentPlotWidget
 from dmm_app.oscilloscope import (
     DHO804_MEMORY_POINTS,
     OscilloscopeSetup,
@@ -46,10 +49,13 @@ from dmm_app.oscilloscope import (
     optimise_waveform_logging,
 )
 from dmm_app.scpi import SCPIClient
+from dmm_app.scope_tools import DHO804ToolsDialog, ScopeToolsState
 from dmm_app.transport import SerialTransport, Transport, VisaTransport
 
 BAUD_RATES = ["1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200"]
 LINE_ENDINGS = {"LF (\\n)": b"\n", "CRLF (\\r\\n)": b"\r\n", "CR (\\r)": b"\r"}
+CONFIG_FILE_FORMAT = "scpi-lab-instrument-config"
+CONFIG_FILE_VERSION = 1
 
 
 @dataclass
@@ -107,6 +113,7 @@ class InstrumentPanel(QGroupBox):
         clock: AcquisitionClock,
         event_sink,
         refresh_sink,
+        endpoint_cache_provider,
         logging_selection_sink,
         waveform_output_directory_provider,
         initial_instrument: InstrumentType,
@@ -117,6 +124,7 @@ class InstrumentPanel(QGroupBox):
         self._clock = clock
         self._event_sink = event_sink
         self._refresh_sink = refresh_sink
+        self._endpoint_cache_provider = endpoint_cache_provider
         self._logging_selection_sink = logging_selection_sink
         self._waveform_output_directory_provider = waveform_output_directory_provider
         self._transport: Transport | None = None
@@ -131,6 +139,10 @@ class InstrumentPanel(QGroupBox):
         self._scope_setup_applied: OscilloscopeSetup | None = None
         self._device_idn = "UNKNOWN"
         self._measurement_rows: list[MeasurementRow] = []
+        self._plot_controls_waveform = False
+        self._sections_before_graph: tuple[bool, bool, bool] | None = None
+        self._stream_requested = False
+        self._scope_tools_dialog: DHO804ToolsDialog | None = None
 
         self._build_ui()
         with QSignalBlocker(self._instrument_combo):
@@ -357,13 +369,19 @@ class InstrumentPanel(QGroupBox):
         self._scope_logging_fidelity_combo.setToolTip(
             "Choose the minimum waveform detail that the optimiser must preserve"
         )
-        scope_layout.addWidget(self._scope_logging_fidelity_combo, 6, 1, 1, 4)
+        scope_layout.addWidget(self._scope_logging_fidelity_combo, 6, 1, 1, 3)
         self._scope_optimise_button = QPushButton("Optimise logging coverage")
         self._scope_optimise_button.setToolTip(
             "Use the selected point count to maximise captured time at the chosen fidelity"
         )
         self._scope_optimise_button.clicked.connect(self._optimise_scope_logging)
-        scope_layout.addWidget(self._scope_optimise_button, 6, 5, 1, 3)
+        scope_layout.addWidget(self._scope_optimise_button, 6, 4, 1, 3)
+        self._scope_tools_button = QPushButton("Tools…")
+        self._scope_tools_button.setToolTip(
+            "Open DHO804 waveform-record diagnostics and the expert SCPI console"
+        )
+        self._scope_tools_button.clicked.connect(self._show_scope_tools)
+        scope_layout.addWidget(self._scope_tools_button, 6, 7)
 
         self._scope_logging_estimate_label = QLabel(
             "Choose a logging goal, then optimise to preview span, cycles and payload."
@@ -386,11 +404,26 @@ class InstrumentPanel(QGroupBox):
         self._scope_section.set_expanded(False)
         layout.addWidget(self._scope_section)
 
+        output_controls = QHBoxLayout()
+        output_controls.addStretch(1)
+        self._plot_range_combo = QComboBox()
+        self._plot_range_combo.currentIndexChanged.connect(self._on_plot_range_changed)
+        output_controls.addWidget(self._plot_range_combo)
+        self._view_toggle_button = QPushButton("Graph view")
+        self._view_toggle_button.clicked.connect(self._toggle_output_view)
+        output_controls.addWidget(self._view_toggle_button)
+        layout.addLayout(output_controls)
+
+        self._output_stack = QStackedWidget()
         self._output = QTextEdit()
         self._output.setReadOnly(True)
         self._output.setMinimumHeight(90)
         self._output.document().setMaximumBlockCount(2000)
-        layout.addWidget(self._output, stretch=1)
+        self._plot = InstrumentPlotWidget()
+        self._output_stack.addWidget(self._output)
+        self._output_stack.addWidget(self._plot)
+        layout.addWidget(self._output_stack, stretch=1)
+        self._configure_plot_range_controls(waveform=False)
 
     @property
     def is_connected(self) -> bool:
@@ -408,6 +441,10 @@ class InstrumentPanel(QGroupBox):
     def is_waveform_logging(self) -> bool:
         return isinstance(self._worker, RepeatedWaveformCaptureWorker) and self.is_running
 
+    @property
+    def is_scope_tools_busy(self) -> bool:
+        return bool(self._scope_tools_dialog and self._scope_tools_dialog.is_busy)
+
     def _waveform_logging_selected(self) -> bool:
         return self._acquisition_mode_combo.currentData() == "waveforms"
 
@@ -415,7 +452,51 @@ class InstrumentPanel(QGroupBox):
         self._interval_label.setText(
             "Min interval (ms)" if self._waveform_logging_selected() else "Interval (ms)"
         )
+        self._configure_plot_range_controls(waveform=self._waveform_logging_selected())
         self._refresh_controls()
+
+    def _toggle_output_view(self) -> None:
+        graph_visible = self._output_stack.currentWidget() is self._plot
+        if graph_visible:
+            self._output_stack.setCurrentWidget(self._output)
+            self._view_toggle_button.setText("Graph view")
+            if self._sections_before_graph is not None:
+                profile, measurement, scope = self._sections_before_graph
+                self._profile_section.set_expanded(profile)
+                self._measurement_section.set_expanded(measurement)
+                self._scope_section.set_expanded(scope)
+            self._sections_before_graph = None
+        else:
+            self._sections_before_graph = (
+                self._profile_section.is_expanded,
+                self._measurement_section.is_expanded,
+                self._scope_section.is_expanded,
+            )
+            self._profile_section.set_expanded(False)
+            self._measurement_section.set_expanded(False)
+            self._scope_section.set_expanded(False)
+            self._output_stack.setCurrentWidget(self._plot)
+            self._view_toggle_button.setText("Text view")
+
+    def _configure_plot_range_controls(self, waveform: bool) -> None:
+        self._plot_controls_waveform = waveform
+        with QSignalBlocker(self._plot_range_combo):
+            self._plot_range_combo.clear()
+            if waveform:
+                self._plot_range_combo.addItem("Scope viewport", "scope")
+                self._plot_range_combo.addItem("Full RAW record", "full")
+            else:
+                self._plot_range_combo.addItem("Last 60 s", 60.0)
+                self._plot_range_combo.addItem("Last 10 min", 600.0)
+                self._plot_range_combo.addItem("All data", None)
+        self._on_plot_range_changed(self._plot_range_combo.currentIndex())
+
+    def _on_plot_range_changed(self, _index: int) -> None:
+        selection = self._plot_range_combo.currentData()
+        if self._plot_controls_waveform:
+            self._plot.set_waveform_full_record(selection == "full")
+        else:
+            self._plot.set_scalar_window(selection)
 
     def _selected_instrument(self) -> InstrumentType:
         return InstrumentType(self._instrument_combo.currentText())
@@ -427,16 +508,25 @@ class InstrumentPanel(QGroupBox):
         if self.is_connected:
             return
         self._reload_profile()
-        self._refresh_sink()
+        serial_ports, visa_resources = self._endpoint_cache_provider()
+        self.refresh_endpoints(serial_ports, visa_resources, preserve_selection=False)
 
     def _reload_profile(self) -> None:
         profile = self._selected_profile()
         has_instrument = profile.instrument != InstrumentType.NONE
         is_scope = profile.instrument == InstrumentType.RIGOL_DHO804
+        if not is_scope and self._scope_tools_dialog is not None:
+            self._shutdown_scope_tools()
         self._scope_setup_applied = None
+        self._stream_requested = False
+        self._plot.configure_profile(scope_profile=is_scope)
         with QSignalBlocker(self._acquisition_mode_combo):
             self._acquisition_mode_combo.setCurrentIndex(0)
         self._interval_label.setText("Interval (ms)")
+        self._configure_plot_range_controls(waveform=False)
+        self._output_stack.setCurrentWidget(self._output)
+        self._view_toggle_button.setText("Graph view")
+        self._sections_before_graph = None
         logging_was_enabled = self._logging_checkbox.isChecked()
         with QSignalBlocker(self._logging_checkbox):
             self._logging_checkbox.setChecked(False)
@@ -463,6 +553,8 @@ class InstrumentPanel(QGroupBox):
         self._idn_button.setVisible(has_instrument and profile.supports_identity_query)
         self._measurement_section.setVisible(has_instrument)
         self._logging_checkbox.setVisible(has_instrument)
+        self._view_toggle_button.setVisible(has_instrument)
+        self._plot_range_combo.setVisible(has_instrument)
         self._scope_section.setVisible(is_scope)
         self._status_label.setText("Disconnected" if has_instrument else "Select an instrument profile")
         if has_instrument:
@@ -473,8 +565,170 @@ class InstrumentPanel(QGroupBox):
     def _first_source(profile: InstrumentProfile) -> str:
         return profile.sources[0] if profile.sources else ""
 
-    def refresh_endpoints(self, serial_ports: list[str], visa_resources: list[str]) -> None:
-        selected = self._endpoint_combo.currentText().strip()
+    def configuration_dict(self) -> dict[str, object]:
+        graph_visible = self._output_stack.currentWidget() is self._plot
+        if graph_visible and self._sections_before_graph is not None:
+            profile_expanded, measurement_expanded, scope_expanded = self._sections_before_graph
+        else:
+            profile_expanded = self._profile_section.is_expanded
+            measurement_expanded = self._measurement_section.is_expanded
+            scope_expanded = self._scope_section.is_expanded
+        return {
+            "instrument": self._selected_instrument().value,
+            "connection": {
+                "endpoint": self._endpoint_combo.currentText().strip(),
+                "baud": self._baud_combo.currentText(),
+                "line_ending": self._ending_combo.currentText(),
+            },
+            "acquisition": {
+                "mode": str(self._acquisition_mode_combo.currentData()),
+                "interval_ms": self._interval_input.text(),
+            },
+            "measurements": [
+                {
+                    "function": row.function_combo.currentText(),
+                    "source": (
+                        row.source_combo.currentText()
+                        if self._selected_profile().sources
+                        else ""
+                    ),
+                }
+                for row in self._measurement_rows
+            ],
+            "view": {
+                "mode": "graph" if graph_visible else "text",
+                "range": self._plot_range_combo.currentData(),
+                "sections": {
+                    "profile": profile_expanded,
+                    "measurement": measurement_expanded,
+                    "oscilloscope": scope_expanded,
+                },
+            },
+            "oscilloscope": {
+                "only_selected_channel": self._scope_only_channel_checkbox.isChecked(),
+                "channel": self._scope_channel_combo.currentText(),
+                "probe_ratio": self._scope_probe_combo.currentText(),
+                "coupling": self._scope_coupling_combo.currentText(),
+                "bandwidth_limit": str(self._scope_bandwidth_combo.currentData()),
+                "vertical_scale_volts": self._scope_vertical_scale_input.text(),
+                "switching_frequency_khz": self._scope_frequency_input.text(),
+                "visible_cycles": self._scope_cycles_combo.currentText(),
+                "time_scale_seconds": self._scope_time_scale_input.text(),
+                "memory_depth": self._scope_memory_combo.currentText(),
+                "waveform_points": self._scope_points_input.text(),
+                "acquisition_type": str(self._scope_acquisition_combo.currentData()),
+                "trigger_slope": str(self._scope_trigger_slope_combo.currentData()),
+                "trigger_level_volts": self._scope_trigger_level_input.text(),
+                "trigger_timeout_seconds": self._scope_trigger_timeout_input.text(),
+                "logging_fidelity": str(self._scope_logging_fidelity_combo.currentData()),
+            },
+        }
+
+    @staticmethod
+    def _set_combo_data(combo: QComboBox, value: object) -> None:
+        for index in range(combo.count()):
+            if combo.itemData(index) == value:
+                combo.setCurrentIndex(index)
+                return
+        raise ValueError(f"Unsupported saved selection: {value!r}")
+
+    @staticmethod
+    def _set_combo_text(combo: QComboBox, value: str) -> None:
+        index = combo.findText(value)
+        if index < 0:
+            raise ValueError(f"Unsupported saved selection: {value!r}")
+        combo.setCurrentIndex(index)
+
+    def apply_configuration(self, configuration: dict[str, object]) -> None:
+        instrument = InstrumentType(str(configuration["instrument"]))
+        with QSignalBlocker(self._instrument_combo):
+            self._instrument_combo.setCurrentText(instrument.value)
+        self._reload_profile()
+        serial_ports, visa_resources = self._endpoint_cache_provider()
+        self.refresh_endpoints(serial_ports, visa_resources, preserve_selection=False)
+
+        connection = configuration["connection"]
+        assert isinstance(connection, dict)
+        endpoint = str(connection["endpoint"])
+        if endpoint:
+            if self._endpoint_combo.findText(endpoint) < 0:
+                self._endpoint_combo.addItem(endpoint)
+            self._endpoint_combo.setCurrentText(endpoint)
+        self._set_combo_text(self._baud_combo, str(connection["baud"]))
+        self._set_combo_text(self._ending_combo, str(connection["line_ending"]))
+
+        acquisition = configuration["acquisition"]
+        assert isinstance(acquisition, dict)
+        self._set_combo_data(self._acquisition_mode_combo, acquisition["mode"])
+        self._interval_input.setText(str(acquisition["interval_ms"]))
+
+        self._clear_measurement_rows()
+        measurements = configuration["measurements"]
+        assert isinstance(measurements, list)
+        for measurement in measurements:
+            assert isinstance(measurement, dict)
+            self._add_measurement_row(
+                MeasurementFunction(str(measurement["function"])),
+                str(measurement["source"]),
+            )
+
+        scope = configuration["oscilloscope"]
+        assert isinstance(scope, dict)
+        self._scope_only_channel_checkbox.setChecked(bool(scope["only_selected_channel"]))
+        self._set_combo_text(self._scope_channel_combo, str(scope["channel"]))
+        self._set_combo_text(self._scope_probe_combo, str(scope["probe_ratio"]))
+        self._set_combo_text(self._scope_coupling_combo, str(scope["coupling"]))
+        self._set_combo_data(self._scope_bandwidth_combo, scope["bandwidth_limit"])
+        self._scope_vertical_scale_input.setText(str(scope["vertical_scale_volts"]))
+        self._scope_frequency_input.setText(str(scope["switching_frequency_khz"]))
+        self._set_combo_text(self._scope_cycles_combo, str(scope["visible_cycles"]))
+        self._scope_time_scale_input.setText(str(scope["time_scale_seconds"]))
+        self._set_combo_text(self._scope_memory_combo, str(scope["memory_depth"]))
+        self._scope_points_input.setText(str(scope["waveform_points"]))
+        self._set_combo_data(self._scope_acquisition_combo, scope["acquisition_type"])
+        self._set_combo_data(self._scope_trigger_slope_combo, scope["trigger_slope"])
+        self._scope_trigger_level_input.setText(str(scope["trigger_level_volts"]))
+        self._scope_trigger_timeout_input.setText(str(scope["trigger_timeout_seconds"]))
+        self._set_combo_data(self._scope_logging_fidelity_combo, scope["logging_fidelity"])
+
+        # A configuration file cannot verify the present physical probe/ground connection,
+        # and loading controls does not mean that those controls have been sent to the scope.
+        self._scope_safety_checkbox.setChecked(False)
+        self._scope_setup_applied = None
+
+        view = configuration["view"]
+        assert isinstance(view, dict)
+        self._set_combo_data(self._plot_range_combo, view["range"])
+        sections = view["sections"]
+        assert isinstance(sections, dict)
+        section_states = (
+            bool(sections["profile"]),
+            bool(sections["measurement"]),
+            bool(sections["oscilloscope"]),
+        )
+        if view["mode"] == "graph":
+            self._sections_before_graph = section_states
+            self._profile_section.set_expanded(False)
+            self._measurement_section.set_expanded(False)
+            self._scope_section.set_expanded(False)
+            self._output_stack.setCurrentWidget(self._plot)
+            self._view_toggle_button.setText("Text view")
+        else:
+            self._sections_before_graph = None
+            self._profile_section.set_expanded(section_states[0])
+            self._measurement_section.set_expanded(section_states[1])
+            self._scope_section.set_expanded(section_states[2])
+            self._output_stack.setCurrentWidget(self._output)
+            self._view_toggle_button.setText("Graph view")
+        self._refresh_controls()
+
+    def refresh_endpoints(
+        self,
+        serial_ports: list[str],
+        visa_resources: list[str],
+        preserve_selection: bool = True,
+    ) -> None:
+        selected = self._endpoint_combo.currentText().strip() if preserve_selection else ""
         endpoints = (
             serial_ports
             if self._selected_profile().connection_kind == ConnectionKind.SERIAL
@@ -588,6 +842,7 @@ class InstrumentPanel(QGroupBox):
         profile = self._selected_profile()
         connected = self.is_connected
         running = self.is_running
+        tools_busy = self.is_scope_tools_busy
         waveform_mode = (
             profile.instrument == InstrumentType.RIGOL_DHO804
             and self._waveform_logging_selected()
@@ -596,14 +851,19 @@ class InstrumentPanel(QGroupBox):
             self._scope_safety_checkbox.isChecked() and self._scope_setup_applied is not None
         )
         self._start_button.setEnabled(
-            connected and not running and (not waveform_mode or waveform_ready)
+            connected and not running and not tools_busy and (not waveform_mode or waveform_ready)
         )
         self._stop_button.setEnabled(running)
         self._snapshot_button.setEnabled(
-            connected and not running and not profile.is_raw_serial and not waveform_mode
+            connected
+            and not running
+            and not tools_busy
+            and not profile.is_raw_serial
+            and not waveform_mode
         )
         self._add_button.setEnabled(
             not running
+            and not tools_busy
             and not profile.is_raw_serial
             and not waveform_mode
             and len(self._measurement_rows) < profile.maximum_rows
@@ -611,27 +871,51 @@ class InstrumentPanel(QGroupBox):
         )
         for row in self._measurement_rows:
             row.function_combo.setEnabled(
-                not running and not profile.is_raw_serial and not waveform_mode
+                not running and not tools_busy and not profile.is_raw_serial and not waveform_mode
             )
             row.source_combo.setEnabled(
-                not running and bool(profile.sources) and not waveform_mode
+                not running and not tools_busy and bool(profile.sources) and not waveform_mode
             )
             row.remove_button.setEnabled(
-                not running and not waveform_mode and len(self._measurement_rows) > 1
+                not running
+                and not tools_busy
+                and not waveform_mode
+                and len(self._measurement_rows) > 1
             )
-        self._acquisition_mode_combo.setEnabled(not running)
-        self._logging_checkbox.setEnabled(not running)
+        self._acquisition_mode_combo.setEnabled(not running and not tools_busy)
+        self._logging_checkbox.setEnabled(not running and not tools_busy)
         is_scope = profile.instrument == InstrumentType.RIGOL_DHO804
         safety_verified = self._scope_safety_checkbox.isChecked()
-        self._scope_apply_button.setEnabled(is_scope and connected and not running and safety_verified)
-        self._scope_optimise_button.setEnabled(is_scope and not running)
+        self._connect_button.setEnabled(not tools_busy)
+        self._idn_button.setEnabled(connected and not running and not tools_busy)
+        self._scope_apply_button.setEnabled(
+            is_scope and connected and not running and not tools_busy and safety_verified
+        )
+        self._scope_optimise_button.setEnabled(is_scope and not running and not tools_busy)
         self._scope_capture_button.setEnabled(
             is_scope
             and connected
             and not running
+            and not tools_busy
             and safety_verified
             and self._scope_setup_applied is not None
         )
+        self._scope_tools_button.setEnabled(is_scope)
+        self._plot.set_stream_expected(
+            connected and running and self._stream_requested,
+            stale_after_seconds=self._live_data_timeout_seconds(profile),
+        )
+
+    def _live_data_timeout_seconds(self, profile: InstrumentProfile) -> float:
+        if profile.is_raw_serial:
+            return 3.0
+        try:
+            interval_seconds = max(0.0, int(self._interval_input.text().strip()) / 1000.0)
+        except ValueError:
+            interval_seconds = 1.0
+        if profile.instrument == InstrumentType.RIGOL_DHO804 and self._waveform_logging_selected():
+            return max(5.0, interval_seconds * 2.5 + 0.5)
+        return max(2.5, interval_seconds * 2.5 + 0.5)
 
     def _calculate_scope_timebase(self) -> None:
         try:
@@ -805,6 +1089,9 @@ class InstrumentPanel(QGroupBox):
                 "capture_complete", self.instrument_index, message
             ),
             on_error=lambda error: self._event_sink("error", self.instrument_index, error),
+            on_warning=lambda warning: self._event_sink(
+                "warning", self.instrument_index, warning
+            ),
         )
         self._worker.start()
         self._append_output(
@@ -812,6 +1099,48 @@ class InstrumentPanel(QGroupBox):
             f"{current_setup.trigger_timeout_seconds:g} s for STOP."
         )
         self._refresh_controls()
+
+    def _show_scope_tools(self) -> None:
+        if self._selected_instrument() != InstrumentType.RIGOL_DHO804:
+            return
+        if self._scope_tools_dialog is None:
+            self._scope_tools_dialog = DHO804ToolsDialog(
+                scpi_provider=lambda: self._scpi,
+                state_provider=self._scope_tools_state,
+                setup_provider=lambda: self._scope_setup_applied,
+                on_setup_invalidated=self._scope_tools_invalidated_setup,
+                on_busy_changed=self._refresh_controls,
+                parent=self.window(),
+            )
+        self._scope_tools_dialog.show()
+        self._scope_tools_dialog.raise_()
+        self._scope_tools_dialog.activateWindow()
+
+    def _scope_tools_state(self) -> ScopeToolsState:
+        return ScopeToolsState(
+            connected=self.is_connected,
+            acquisition_running=self.is_running,
+            setup_applied=self._scope_setup_applied is not None,
+            connection=self._endpoint_combo.currentText().strip(),
+            device_idn=self._device_idn,
+        )
+
+    def _scope_tools_invalidated_setup(self, reason: str) -> None:
+        self._scope_setup_applied = None
+        self._append_output(
+            f"DHO804 tools changed scope state ({reason}); click Apply setup before "
+            "normal capture or waveform logging."
+        )
+        self._refresh_controls()
+
+    def _shutdown_scope_tools(self) -> None:
+        if self._scope_tools_dialog is None:
+            return
+        dialog = self._scope_tools_dialog
+        self._scope_tools_dialog = None
+        dialog.shutdown()
+        dialog.hide()
+        dialog.deleteLater()
 
     def _toggle_connection(self) -> None:
         if self.is_connected:
@@ -880,6 +1209,7 @@ class InstrumentPanel(QGroupBox):
         self._scpi = None
 
     def disconnect_device(self, announce: bool = True) -> None:
+        self._shutdown_scope_tools()
         self.stop_acquisition(announce=announce)
         if self.is_running:
             if announce:
@@ -978,6 +1308,14 @@ class InstrumentPanel(QGroupBox):
         start_gate: threading.Event | None = None,
         announce: bool = True,
     ) -> bool:
+        if self.is_scope_tools_busy:
+            if announce:
+                QMessageBox.warning(
+                    self,
+                    "DHO804 tools active",
+                    "Stop the DHO804 tools operation before starting acquisition.",
+                )
+            return False
         if not self.is_connected:
             if announce:
                 QMessageBox.warning(self, "Not connected", "Connect this instrument before starting.")
@@ -1019,8 +1357,9 @@ class InstrumentPanel(QGroupBox):
                 QMessageBox.warning(
                     self,
                     "Waveform log destination",
-                    "Choose a CSV log file and enable logging for this instrument, or enable "
-                    "Shared CSV log, before starting repeated waveform capture.",
+                    "Enable 'Log this instrument' and choose its CSV destination before "
+                    "starting repeated waveform capture. When shared CSV mode is active, "
+                    "the selected shared file is used.",
                 )
                 return False
             repeated_output_directory = output_directory
@@ -1042,6 +1381,9 @@ class InstrumentPanel(QGroupBox):
                 on_error=lambda error: self._event_sink("error", self.instrument_index, error),
                 on_progress=lambda progress: self._event_sink(
                     "capture_progress", self.instrument_index, progress
+                ),
+                on_warning=lambda warning: self._event_sink(
+                    "warning", self.instrument_index, warning
                 ),
                 start_gate=start_gate,
             )
@@ -1069,7 +1411,6 @@ class InstrumentPanel(QGroupBox):
                 on_error=lambda error: self._event_sink("error", self.instrument_index, error),
                 start_gate=start_gate,
             )
-        self._worker.start()
         if profile.is_raw_serial:
             message = "Listening started."
         elif isinstance(self._worker, RepeatedWaveformCaptureWorker):
@@ -1077,10 +1418,14 @@ class InstrumentPanel(QGroupBox):
         else:
             message = "Polling started."
         self._append_output(message)
+        self._stream_requested = True
+        self._worker.start()
         self._refresh_controls()
         return True
 
     def stop_acquisition(self, _checked: bool = False, announce: bool = True) -> None:
+        self._stream_requested = False
+        self._plot.set_stream_expected(False)
         if self._worker and self._worker.is_alive():
             self._worker.stop()
             self._worker.join(timeout=1.5)
@@ -1145,12 +1490,25 @@ class InstrumentPanel(QGroupBox):
             f"{reading.timestamp.strftime('%H:%M:%S.%f')}  +{reading.elapsed_seconds:.6f}s | "
             f"{reading.function.value}{source}: {display}"
         )
+        try:
+            waveform = reading.function == MeasurementFunction.WAVEFORM_CAPTURE
+            if waveform != self._plot_controls_waveform:
+                self._configure_plot_range_controls(waveform=waveform)
+            self._plot.add_reading(reading)
+            self._plot.note_live_reading()
+        except Exception as exc:
+            self._append_output(f"Graph update error: {exc}")
 
     def handle_worker_error(self, error: object) -> None:
+        self._stream_requested = False
         self._append_output(f"Acquisition error: {error}")
         self.stop_acquisition(announce=False)
 
+    def handle_worker_warning(self, warning: object) -> None:
+        self._append_output(f"Acquisition recovery: {warning}")
+
     def handle_capture_complete(self, message: object) -> None:
+        self._stream_requested = False
         self._append_output(str(message))
         self._worker = None
         self._refresh_controls()
@@ -1190,8 +1548,13 @@ class DMMAppWindow(QMainWindow):
         self.setMinimumSize(1120, 720)
         self._clock = AcquisitionClock()
         self._events: queue.Queue[tuple[str, int, object]] = queue.Queue()
-        self._logger: CsvLogger | None = None
+        self._shared_logger: CsvLogger | None = None
+        self._shared_log_path: str | None = None
+        self._panel_loggers: dict[int, CsvLogger] = {}
+        self._panel_log_paths: dict[int, str] = {}
         self._panels: list[InstrumentPanel] = []
+        self._serial_endpoints: list[str] = []
+        self._visa_endpoints: list[str] = []
         self._build_ui()
         self._refresh_endpoints()
 
@@ -1217,17 +1580,23 @@ class DMMAppWindow(QMainWindow):
         stop_all = QPushButton("Stop all")
         stop_all.clicked.connect(self._stop_all)
         toolbar.addWidget(stop_all)
+        self._save_config_button = QPushButton("Save config…")
+        self._save_config_button.clicked.connect(self._save_configuration)
+        toolbar.addWidget(self._save_config_button)
+        self._load_config_button = QPushButton("Load config…")
+        self._load_config_button.clicked.connect(self._load_configuration)
+        toolbar.addWidget(self._load_config_button)
         toolbar.addSpacing(12)
-        self._log_checkbox = QCheckBox("Shared CSV log")
+        self._log_checkbox = QCheckBox("Use shared CSV")
         self._log_checkbox.setToolTip(
-            "Log every instrument to the selected CSV, overriding individual panel selections"
+            "Send each selected instrument to one shared CSV file"
         )
         self._log_checkbox.toggled.connect(self._toggle_shared_logging)
         toolbar.addWidget(self._log_checkbox)
-        self._choose_log_button = QPushButton("Choose log file")
-        self._choose_log_button.clicked.connect(self._choose_log_file)
+        self._choose_log_button = QPushButton("Choose shared file")
+        self._choose_log_button.clicked.connect(self._choose_shared_log_file)
         toolbar.addWidget(self._choose_log_button)
-        self._log_path_label = QLabel("")
+        self._log_path_label = QLabel("No shared file selected")
         self._log_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         toolbar.addWidget(self._log_path_label, stretch=1)
         self._elapsed_label = QLabel("Session +0.000 s")
@@ -1243,6 +1612,7 @@ class DMMAppWindow(QMainWindow):
                 clock=self._clock,
                 event_sink=self._enqueue_event,
                 refresh_sink=self._refresh_endpoints,
+                endpoint_cache_provider=self._cached_endpoints,
                 logging_selection_sink=self._toggle_panel_logging,
                 waveform_output_directory_provider=self._waveform_output_directory,
                 initial_instrument=instrument,
@@ -1255,18 +1625,346 @@ class DMMAppWindow(QMainWindow):
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         layout.addLayout(grid, stretch=1)
+        self._update_all_panel_logging_tooltips()
 
     def _enqueue_event(self, kind: str, instrument_index: int, payload: object) -> None:
         self._events.put((kind, instrument_index, payload))
 
     def _refresh_endpoints(self) -> None:
-        serial_ports = SerialTransport.list_serial_ports()
-        visa_resources = VisaTransport.list_resources()
+        self._serial_endpoints = SerialTransport.list_serial_ports()
+        visa_acquisition_active = any(
+            panel.is_running
+            and panel._selected_profile().connection_kind == ConnectionKind.VISA
+            for panel in self._panels
+        )
+        if not visa_acquisition_active:
+            self._visa_endpoints = VisaTransport.list_resources()
         for panel in self._panels:
-            panel.refresh_endpoints(serial_ports, visa_resources)
+            panel.refresh_endpoints(self._serial_endpoints, self._visa_endpoints)
+
+    def _cached_endpoints(self) -> tuple[list[str], list[str]]:
+        return list(self._serial_endpoints), list(self._visa_endpoints)
+
+    def _configuration_document(self) -> dict[str, object]:
+        panel_documents: list[dict[str, object]] = []
+        for instrument_index, panel in enumerate(self._panels):
+            panel_document = panel.configuration_dict()
+            panel_document["logging"] = {
+                "enabled": panel.logging_enabled,
+                "individual_csv_path": self._panel_log_paths.get(instrument_index),
+            }
+            panel_documents.append(panel_document)
+        return {
+            "format": CONFIG_FILE_FORMAT,
+            "version": CONFIG_FILE_VERSION,
+            "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "application": {
+                "use_shared_csv": self._log_checkbox.isChecked(),
+                "shared_csv_path": self._shared_log_path,
+            },
+            "panels": panel_documents,
+        }
+
+    @staticmethod
+    def _configuration_mapping(value: object, name: str) -> dict[str, object]:
+        if not isinstance(value, dict):
+            raise ValueError(f"{name} must be a JSON object.")
+        return value
+
+    @staticmethod
+    def _configuration_string(value: object, name: str) -> str:
+        if not isinstance(value, str):
+            raise ValueError(f"{name} must be text.")
+        if len(value) > 4096:
+            raise ValueError(f"{name} is too long.")
+        return value
+
+    @staticmethod
+    def _configuration_bool(value: object, name: str) -> bool:
+        if not isinstance(value, bool):
+            raise ValueError(f"{name} must be true or false.")
+        return value
+
+    @classmethod
+    def _validated_configuration(cls, document: object) -> dict[str, object]:
+        root = cls._configuration_mapping(document, "Configuration")
+        if root.get("format") != CONFIG_FILE_FORMAT:
+            raise ValueError("This is not an SCPI Lab Instrument configuration file.")
+        if root.get("version") != CONFIG_FILE_VERSION:
+            raise ValueError(
+                f"Unsupported configuration version {root.get('version')!r}; "
+                f"this application supports version {CONFIG_FILE_VERSION}."
+            )
+
+        application = cls._configuration_mapping(root.get("application"), "application")
+        use_shared_csv = cls._configuration_bool(
+            application.get("use_shared_csv"), "application.use_shared_csv"
+        )
+        shared_csv_path_value = application.get("shared_csv_path")
+        if shared_csv_path_value is not None:
+            shared_csv_path = cls._configuration_string(
+                shared_csv_path_value, "application.shared_csv_path"
+            )
+            if not shared_csv_path:
+                shared_csv_path_value = None
+
+        panels = root.get("panels")
+        if not isinstance(panels, list) or len(panels) != 4:
+            raise ValueError("Configuration must contain exactly four instrument panels.")
+
+        for instrument_index, panel_value in enumerate(panels):
+            prefix = f"panels[{instrument_index}]"
+            panel = cls._configuration_mapping(panel_value, prefix)
+            try:
+                instrument = InstrumentType(
+                    cls._configuration_string(panel.get("instrument"), f"{prefix}.instrument")
+                )
+            except ValueError as exc:
+                raise ValueError(f"{prefix}.instrument is not supported.") from exc
+            profile = INSTRUMENT_PROFILES[instrument]
+
+            connection = cls._configuration_mapping(
+                panel.get("connection"), f"{prefix}.connection"
+            )
+            cls._configuration_string(connection.get("endpoint"), f"{prefix}.connection.endpoint")
+            baud = cls._configuration_string(connection.get("baud"), f"{prefix}.connection.baud")
+            if baud not in BAUD_RATES:
+                raise ValueError(f"{prefix}.connection.baud is not supported.")
+            line_ending = cls._configuration_string(
+                connection.get("line_ending"), f"{prefix}.connection.line_ending"
+            )
+            if line_ending not in LINE_ENDINGS:
+                raise ValueError(f"{prefix}.connection.line_ending is not supported.")
+
+            acquisition = cls._configuration_mapping(
+                panel.get("acquisition"), f"{prefix}.acquisition"
+            )
+            acquisition_mode = cls._configuration_string(
+                acquisition.get("mode"), f"{prefix}.acquisition.mode"
+            )
+            if acquisition_mode not in {"measurements", "waveforms"}:
+                raise ValueError(f"{prefix}.acquisition.mode is not supported.")
+            if instrument != InstrumentType.RIGOL_DHO804 and acquisition_mode != "measurements":
+                raise ValueError(f"{prefix} can only use measurement acquisition mode.")
+            cls._configuration_string(
+                acquisition.get("interval_ms"), f"{prefix}.acquisition.interval_ms"
+            )
+
+            measurements = panel.get("measurements")
+            if not isinstance(measurements, list):
+                raise ValueError(f"{prefix}.measurements must be a JSON array.")
+            expected_minimum = 0 if instrument == InstrumentType.NONE else 1
+            if not expected_minimum <= len(measurements) <= profile.maximum_rows:
+                raise ValueError(f"{prefix}.measurements has an invalid number of rows.")
+            measurement_keys: set[tuple[MeasurementFunction, str]] = set()
+            for row_index, measurement_value in enumerate(measurements):
+                row_name = f"{prefix}.measurements[{row_index}]"
+                measurement = cls._configuration_mapping(measurement_value, row_name)
+                try:
+                    function = MeasurementFunction(
+                        cls._configuration_string(
+                            measurement.get("function"), f"{row_name}.function"
+                        )
+                    )
+                except ValueError as exc:
+                    raise ValueError(f"{row_name}.function is not supported.") from exc
+                if function not in profile.commands:
+                    raise ValueError(f"{row_name}.function is invalid for the selected profile.")
+                source = cls._configuration_string(
+                    measurement.get("source"), f"{row_name}.source"
+                )
+                if profile.sources:
+                    if source not in profile.sources:
+                        raise ValueError(f"{row_name}.source is invalid for the selected profile.")
+                elif source:
+                    raise ValueError(f"{row_name}.source must be empty for this profile.")
+                key = (function, source)
+                if key in measurement_keys:
+                    raise ValueError(f"{prefix}.measurements contains a duplicate row.")
+                measurement_keys.add(key)
+
+            view = cls._configuration_mapping(panel.get("view"), f"{prefix}.view")
+            view_mode = cls._configuration_string(view.get("mode"), f"{prefix}.view.mode")
+            if view_mode not in {"text", "graph"}:
+                raise ValueError(f"{prefix}.view.mode is not supported.")
+            plot_range = view.get("range")
+            allowed_ranges = {"scope", "full"} if acquisition_mode == "waveforms" else {60.0, 600.0, None}
+            if plot_range not in allowed_ranges:
+                raise ValueError(f"{prefix}.view.range is not supported for its acquisition mode.")
+            sections = cls._configuration_mapping(
+                view.get("sections"), f"{prefix}.view.sections"
+            )
+            for section_name in ("profile", "measurement", "oscilloscope"):
+                cls._configuration_bool(
+                    sections.get(section_name), f"{prefix}.view.sections.{section_name}"
+                )
+
+            scope = cls._configuration_mapping(
+                panel.get("oscilloscope"), f"{prefix}.oscilloscope"
+            )
+            cls._configuration_bool(
+                scope.get("only_selected_channel"),
+                f"{prefix}.oscilloscope.only_selected_channel",
+            )
+            scope_choices = {
+                "channel": {"CHANnel1", "CHANnel2", "CHANnel3", "CHANnel4"},
+                "probe_ratio": {"1", "10", "20", "50", "100", "500", "1000"},
+                "coupling": {"DC", "AC", "GND"},
+                "bandwidth_limit": {"OFF", "20M"},
+                "visible_cycles": {"2", "3", "4", "5"},
+                "memory_depth": set(DHO804_MEMORY_POINTS),
+                "acquisition_type": {"NORMal", "PEAK", "ULTRa"},
+                "trigger_slope": {"POSitive", "NEGative", "RFALl"},
+                "logging_fidelity": {"coverage", "balanced", "edge"},
+            }
+            for field, allowed_values in scope_choices.items():
+                value = cls._configuration_string(
+                    scope.get(field), f"{prefix}.oscilloscope.{field}"
+                )
+                if value not in allowed_values:
+                    raise ValueError(f"{prefix}.oscilloscope.{field} is not supported.")
+            for field in (
+                "vertical_scale_volts",
+                "switching_frequency_khz",
+                "time_scale_seconds",
+                "waveform_points",
+                "trigger_level_volts",
+                "trigger_timeout_seconds",
+            ):
+                cls._configuration_string(scope.get(field), f"{prefix}.oscilloscope.{field}")
+
+            logging = cls._configuration_mapping(panel.get("logging"), f"{prefix}.logging")
+            logging_enabled = cls._configuration_bool(
+                logging.get("enabled"), f"{prefix}.logging.enabled"
+            )
+            individual_path_value = logging.get("individual_csv_path")
+            if individual_path_value is not None:
+                individual_path = cls._configuration_string(
+                    individual_path_value, f"{prefix}.logging.individual_csv_path"
+                )
+                if not individual_path:
+                    individual_path_value = None
+            if logging_enabled and use_shared_csv and not shared_csv_path_value:
+                raise ValueError("Selected shared logging requires a shared CSV path.")
+            if logging_enabled and not use_shared_csv and not individual_path_value:
+                raise ValueError(f"{prefix} has logging enabled but no individual CSV path.")
+        return root
+
+    def _write_configuration_file(self, path: str) -> None:
+        Path(path).write_text(
+            json.dumps(self._configuration_document(), indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def _apply_configuration_document(self, document: object) -> None:
+        configuration = self._validated_configuration(document)
+        application = configuration["application"]
+        panels = configuration["panels"]
+        assert isinstance(application, dict)
+        assert isinstance(panels, list)
+
+        self._close_shared_logger()
+        self._close_panel_loggers(clear_paths=True)
+        with QSignalBlocker(self._log_checkbox):
+            self._log_checkbox.setChecked(False)
+        for panel in self._panels:
+            with QSignalBlocker(panel._logging_checkbox):
+                panel._logging_checkbox.setChecked(False)
+
+        for panel, panel_configuration in zip(self._panels, panels, strict=True):
+            assert isinstance(panel_configuration, dict)
+            panel.apply_configuration(panel_configuration)
+
+        shared_path = application["shared_csv_path"]
+        self._shared_log_path = str(shared_path) if shared_path else None
+        self._log_path_label.setText(
+            self._shared_log_path or "No shared file selected"
+        )
+        self._panel_log_paths = {}
+        for instrument_index, panel_configuration in enumerate(panels):
+            assert isinstance(panel_configuration, dict)
+            logging = panel_configuration["logging"]
+            assert isinstance(logging, dict)
+            individual_path = logging["individual_csv_path"]
+            if individual_path:
+                self._panel_log_paths[instrument_index] = str(individual_path)
+
+        with QSignalBlocker(self._log_checkbox):
+            self._log_checkbox.setChecked(bool(application["use_shared_csv"]))
+        for panel, panel_configuration in zip(self._panels, panels, strict=True):
+            assert isinstance(panel_configuration, dict)
+            logging = panel_configuration["logging"]
+            assert isinstance(logging, dict)
+            with QSignalBlocker(panel._logging_checkbox):
+                panel._logging_checkbox.setChecked(bool(logging["enabled"]))
+        self._update_loggers()
+        self._update_all_panel_logging_tooltips()
+
+    def _read_configuration_file(self, path: str) -> None:
+        try:
+            document = json.loads(Path(path).read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Invalid JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}."
+            ) from exc
+        self._apply_configuration_document(document)
+
+    def _save_configuration(self, _checked: bool = False) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save instrument configuration",
+            "instrument-config.json",
+            "JSON configuration (*.json)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        try:
+            self._write_configuration_file(path)
+        except (OSError, TypeError, ValueError) as exc:
+            QMessageBox.critical(self, "Save configuration failed", str(exc))
+            return
+        QMessageBox.information(self, "Configuration saved", f"Saved configuration to:\n{path}")
+
+    def _load_configuration(self, _checked: bool = False) -> None:
+        if any(
+            panel.is_connected or panel.is_running or panel.is_scope_tools_busy
+            for panel in self._panels
+        ):
+            QMessageBox.warning(
+                self,
+                "Disconnect instruments first",
+                "Stop acquisition, close any active DHO804 Tools operation, and disconnect "
+                "all instruments before loading a configuration.",
+            )
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load instrument configuration",
+            "",
+            "JSON configuration (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            self._read_configuration_file(path)
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            QMessageBox.critical(self, "Load configuration failed", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Configuration loaded",
+            "Panel settings were restored. Instruments remain disconnected; verify the "
+            "DHO804 probe/ground safety checkbox and apply its setup before acquisition.",
+        )
 
     def _start_all(self) -> None:
-        candidates = [panel for panel in self._panels if panel.is_connected and not panel.is_running]
+        candidates = [
+            panel
+            for panel in self._panels
+            if panel.is_connected and not panel.is_running and not panel.is_scope_tools_busy
+        ]
         if not candidates:
             QMessageBox.information(self, "Start all", "Connect at least one stopped instrument first.")
             return
@@ -1301,10 +1999,13 @@ class DMMAppWindow(QMainWindow):
             panel = self._panels[instrument_index]
             if kind == "reading" and isinstance(payload, Reading):
                 panel.consume_reading(payload)
-                if self._logger and self._should_log_instrument(instrument_index):
-                    self._logger.write_reading(payload)
+                logger = self._logger_for_instrument(instrument_index)
+                if logger is not None:
+                    logger.write_reading(payload)
             elif kind == "error":
                 panel.handle_worker_error(payload)
+            elif kind == "warning":
+                panel.handle_worker_warning(payload)
             elif kind == "capture_complete":
                 panel.handle_capture_complete(payload)
             elif kind == "capture_progress" and isinstance(payload, WaveformCaptureProgress):
@@ -1317,11 +2018,25 @@ class DMMAppWindow(QMainWindow):
         self._choose_log_button.setEnabled(not waveform_logging)
 
     def _should_log_instrument(self, instrument_index: int) -> bool:
-        return self._log_checkbox.isChecked() or self._panels[instrument_index].logging_enabled
+        return self._panels[instrument_index].logging_enabled
+
+    def _logger_for_instrument(self, instrument_index: int) -> CsvLogger | None:
+        if not self._should_log_instrument(instrument_index):
+            return None
+        if self._log_checkbox.isChecked():
+            return self._shared_logger
+        return self._panel_loggers.get(instrument_index)
+
+    def _log_path_for_instrument(self, instrument_index: int) -> str | None:
+        if not self._should_log_instrument(instrument_index):
+            return None
+        if self._log_checkbox.isChecked():
+            return self._shared_log_path
+        return self._panel_log_paths.get(instrument_index)
 
     def _waveform_output_directory(self, instrument_index: int) -> str | None:
-        log_path = self._log_path_label.text()
-        if not log_path or not self._should_log_instrument(instrument_index):
+        log_path = self._log_path_for_instrument(instrument_index)
+        if not log_path:
             return None
         csv_path = Path(log_path)
         return str(
@@ -1330,54 +2045,167 @@ class DMMAppWindow(QMainWindow):
             / f"instrument_{instrument_index + 1}"
         )
 
-    def _logging_requested(self) -> bool:
-        return self._log_checkbox.isChecked() or any(
-            panel.logging_enabled for panel in self._panels
-        )
-
     def _toggle_shared_logging(self, enabled: bool) -> None:
-        if enabled and not self._ensure_log_file():
+        if enabled:
+            if not self._shared_log_path:
+                with QSignalBlocker(self._log_checkbox):
+                    self._log_checkbox.setChecked(False)
+                if not self._choose_shared_log_file():
+                    return
+                with QSignalBlocker(self._log_checkbox):
+                    self._log_checkbox.setChecked(True)
+            self._close_panel_loggers(clear_paths=False)
+            self._update_loggers()
+            self._update_all_panel_logging_tooltips()
+            return
+
+        selected_panels = [
+            panel for panel in self._panels if panel.logging_enabled
+        ]
+        if selected_panels:
+            with QSignalBlocker(self._log_checkbox):
+                self._log_checkbox.setChecked(True)
+            answer = QMessageBox.question(
+                self,
+                "Turn off shared CSV?",
+                "Turning off the shared CSV will also disable logging for all instruments "
+                "currently using it. To log an instrument separately, enable 'Log this "
+                "instrument' again and choose an individual CSV file.",
+                QMessageBox.Yes | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if answer != QMessageBox.Yes:
+                return
             with QSignalBlocker(self._log_checkbox):
                 self._log_checkbox.setChecked(False)
-        self._update_logger()
 
-    def _toggle_panel_logging(self, instrument_index: int, enabled: bool) -> None:
-        if enabled and not self._ensure_log_file():
-            panel = self._panels[instrument_index]
+        self._close_shared_logger()
+        self._close_panel_loggers(clear_paths=True)
+        for panel in selected_panels:
             with QSignalBlocker(panel._logging_checkbox):
                 panel._logging_checkbox.setChecked(False)
-        self._update_logger()
+        self._update_all_panel_logging_tooltips()
 
-    def _ensure_log_file(self) -> bool:
-        if self._log_path_label.text():
+    def _toggle_panel_logging(self, instrument_index: int, enabled: bool) -> None:
+        panel = self._panels[instrument_index]
+        if enabled:
+            if self._log_checkbox.isChecked():
+                destination_selected = self._ensure_shared_log_file()
+            else:
+                destination_selected = self._choose_panel_log_file(instrument_index)
+            if not destination_selected:
+                with QSignalBlocker(panel._logging_checkbox):
+                    panel._logging_checkbox.setChecked(False)
+        elif not self._log_checkbox.isChecked():
+            self._close_panel_logger(instrument_index, clear_path=True)
+        self._update_loggers()
+        self._update_panel_logging_tooltip(instrument_index)
+
+    def _ensure_shared_log_file(self) -> bool:
+        if self._shared_log_path:
             return True
-        return self._choose_log_file()
+        return self._choose_shared_log_file()
 
-    def _update_logger(self) -> None:
-        if self._logging_requested() and self._log_path_label.text():
-            if not self._logger:
-                self._logger = CsvLogger(self._log_path_label.text())
-        elif self._logger:
-            self._logger.close()
-            self._logger = None
+    def _update_loggers(self) -> None:
+        selected_indices = {
+            index for index, panel in enumerate(self._panels) if panel.logging_enabled
+        }
+        if self._log_checkbox.isChecked():
+            self._close_panel_loggers(clear_paths=False)
+            if selected_indices and self._shared_log_path:
+                if self._shared_logger is None:
+                    self._shared_logger = CsvLogger(self._shared_log_path)
+            else:
+                self._close_shared_logger()
+            return
 
-    def _choose_log_file(self, _checked: bool = False) -> bool:
-        path, _ = QFileDialog.getSaveFileName(self, "Choose shared log file", "", "CSV files (*.csv)")
+        self._close_shared_logger()
+        for instrument_index in list(self._panel_loggers):
+            if instrument_index not in selected_indices:
+                self._close_panel_logger(instrument_index, clear_path=True)
+        for instrument_index in selected_indices:
+            path = self._panel_log_paths.get(instrument_index)
+            if path and instrument_index not in self._panel_loggers:
+                self._panel_loggers[instrument_index] = CsvLogger(path)
+
+    def _choose_shared_log_file(self, _checked: bool = False) -> bool:
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Choose shared log file",
+            self._shared_log_path or "",
+            "CSV files (*.csv)",
+        )
         if not path:
             return False
         if not path.lower().endswith(".csv"):
             path += ".csv"
-        if self._logger:
-            self._logger.close()
-            self._logger = None
+        self._close_shared_logger()
+        self._shared_log_path = path
         self._log_path_label.setText(path)
-        self._update_logger()
+        self._update_loggers()
+        self._update_all_panel_logging_tooltips()
         return True
+
+    def _choose_panel_log_file(self, instrument_index: int) -> bool:
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            f"Choose log file for Instrument {instrument_index + 1}",
+            self._panel_log_paths.get(instrument_index, ""),
+            "CSV files (*.csv)",
+        )
+        if not path:
+            return False
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+        self._close_panel_logger(instrument_index, clear_path=False)
+        self._panel_log_paths[instrument_index] = path
+        return True
+
+    def _close_shared_logger(self) -> None:
+        if self._shared_logger is not None:
+            self._shared_logger.close()
+            self._shared_logger = None
+
+    def _close_panel_logger(self, instrument_index: int, clear_path: bool) -> None:
+        logger = self._panel_loggers.pop(instrument_index, None)
+        if logger is not None:
+            logger.close()
+        if clear_path:
+            self._panel_log_paths.pop(instrument_index, None)
+
+    def _close_panel_loggers(self, clear_paths: bool) -> None:
+        indices = set(self._panel_loggers)
+        if clear_paths:
+            indices.update(self._panel_log_paths)
+        for instrument_index in indices:
+            self._close_panel_logger(instrument_index, clear_path=clear_paths)
+
+    def _update_panel_logging_tooltip(self, instrument_index: int) -> None:
+        panel = self._panels[instrument_index]
+        if self._log_checkbox.isChecked():
+            destination = self._shared_log_path or "the shared CSV file"
+            panel._logging_checkbox.setToolTip(
+                f"Include this instrument in the shared CSV: {destination}"
+            )
+            return
+        destination = self._panel_log_paths.get(instrument_index)
+        if destination:
+            panel._logging_checkbox.setToolTip(
+                f"Log this instrument to its individual CSV: {destination}"
+            )
+        else:
+            panel._logging_checkbox.setToolTip(
+                "Log this instrument to an individual CSV; selecting this asks for a filename"
+            )
+
+    def _update_all_panel_logging_tooltips(self) -> None:
+        for instrument_index in range(len(self._panels)):
+            self._update_panel_logging_tooltip(instrument_index)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         for panel in self._panels:
+            panel._shutdown_scope_tools()
             panel.disconnect_device(announce=False)
-        if self._logger:
-            self._logger.close()
-            self._logger = None
+        self._close_shared_logger()
+        self._close_panel_loggers(clear_paths=True)
         super().closeEvent(event)

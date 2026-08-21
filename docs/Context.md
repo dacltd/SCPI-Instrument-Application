@@ -13,13 +13,15 @@ Monitor up to four independently connected serial or VISA instruments, including
 - `dmm_app/`: application source code.
 - `dmm_app/models.py`: domain models (serial settings, measurement function, reading).
 - `dmm_app/clock.py`: shared monotonic acquisition clock.
-- `dmm_app/transport.py`: transport abstraction with serial and VISA implementations.
-- `dmm_app/scpi.py`: SCPI client wrapper for command/query.
+- `dmm_app/transport.py`: transport abstraction with serial/VISA implementations and VISA binary-stream recovery.
+- `dmm_app/scpi.py`: SCPI client wrapper for command/query and typed IEEE block failures.
 - `dmm_app/commands.py`: instrument profiles and measurement command catalog.
 - `dmm_app/poller.py`: background polling worker.
 - `dmm_app/oscilloscope.py`: DHO804 setup model, trigger worker, and RAW waveform export.
+- `dmm_app/scope_tools.py`: modeless DHO804 waveform-record diagnostic, per-frame RAW verification/export, and guarded SCPI console.
+- `dmm_app/plotting.py`: two-axis scalar and calibrated DHO804 waveform graph widgets.
 - `dmm_app/logging_util.py`: CSV logging helper.
-- `dmm_app/gui.py`: PySide6 (Qt) GUI and orchestration.
+- `dmm_app/gui.py`: PySide6 (Qt) GUI, orchestration, and versioned JSON configuration persistence.
 - `dmm_app/main.py`: app entrypoint.
 - `docs/`: project docs and decision logs.
 - `requirements.txt`: runtime dependencies.
@@ -53,14 +55,18 @@ Monitor up to four independently connected serial or VISA instruments, including
   - Query returns ASCII text line.
 - Data logging contract:
   - CSV columns include wall timestamp, elapsed seconds, instrument window, endpoint, measurement/source, numeric value, and raw response.
-  - Each instrument panel has an independent logging opt-in; the shared logging control includes every panel as an override.
+  - Each instrument panel has an independent logging opt-in. Shared mode routes only opted-in panels to one common CSV; with shared mode off, each opted-in panel owns a separate CSV path/logger.
   - Repeated DHO804 waveform logging stores RAW WORD payloads and JSON metadata beside the CSV and writes one CSV manifest row per capture.
 - GUI interaction contract:
   - User selects instrument profile prior to connection.
   - User selects serial port/baud or a VISA resource prior to connection.
-  - Enabling either per-panel or shared logging triggers file selection when no destination exists.
+  - Enabling shared mode selects one shared destination; panel checkboxes then opt instruments into that file without another prompt.
+  - With shared mode off, enabling a panel asks for that panel's individual destination. Disabling an active shared mode confirms and then unticks all participating panels.
   - OWON supports multiple measurement rows; MP is single-row only.
   - DHO804 `Start` supports either scalar measurement polling or repeated single-trigger RAW waveform logging.
+  - DHO804 `Tools…` shares the existing panel SCPI client and is mutually exclusive with normal acquisition; state-changing tool operations invalidate the applied normal scope setup.
+  - Every panel can switch between Text and Graph; scalar graphing is limited to two independently scaled traces, and scope graphing shows the latest RAW capture.
+  - Configuration load is permitted only while every panel is disconnected and idle. It restores reusable controls and logging routing but not connection, acquisition, readings, DHO804 safety acknowledgement, or applied hardware state.
 
 ## Open questions / risks
 - Manual reviewed was for MP730424; MP730889 command parity and transport behavior need hardware validation.
@@ -73,8 +79,9 @@ Monitor up to four independently connected serial or VISA instruments, including
 - Add OWON oscilloscope support as an additional profile (ID validation + SCPI command map + capability gating in GUI).
 - Validate DHO804 VISA discovery, identity response, and measurement queries on physical hardware.
 - Validate DHO804 setup, single-trigger status, RAW WORD payload size and preamble on physical hardware.
-- Confirm WORD byte order against a known waveform before adding automatic voltage conversion.
+- Validate scalar auto-ranging and DHO804 scope/full-record graph presentation during bench use.
 - Validate repeated DHO804 capture cadence, stop behavior, and generated manifest paths on physical hardware.
+- Run the DHO804 Tools capability test against physical firmware and validate replay-frame RAW selection, frame timestamp format, maximum frame count, and actual inter-frame spacing.
 - Define shared external-trigger synchronization only if software-correlated timestamps prove insufficient.
 - Add Keithley Battery Simulator support as a new instrument profile with connect/control/read capability.
 - Add OWON SPE stepped output sequencing: allow configuring voltage/current mode steps with per-step time and target voltage/current entries.
@@ -83,7 +90,7 @@ Monitor up to four independently connected serial or VISA instruments, including
 - Add GUI controls for advanced serial options (parity, data bits, stop bits, timeout).
 - Add additional measurement functions to `dmm_app/commands.py`.
 - Add physical-hardware integration tests after the bench devices are available.
-- Add structured status/error indicators (warning/error levels) in UI.
+- Validate the graph fresh-data indicator and IEEE recovery sequence with deliberate USB/LAN interruptions on the physical DHO804.
 - Add log rotation or session-based file naming option.
 - Add model-specific capability gating after ID query.
 - Add packaging guidance (PyInstaller or equivalent) once runtime/toolchain is finalized.

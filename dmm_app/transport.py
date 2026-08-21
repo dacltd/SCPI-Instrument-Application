@@ -35,6 +35,13 @@ class Transport(ABC):
     def read_until(self, terminator: bytes) -> bytes:
         raise NotImplementedError
 
+    def read_binary_response(self) -> bytes:
+        """Read one complete binary response; line transports use their terminator."""
+        return self.read_until(b"\n")
+
+    def recover_binary_response(self) -> None:
+        """Discard an interrupted binary response when the transport supports it."""
+
     @property
     @abstractmethod
     def is_open(self) -> bool:
@@ -151,8 +158,90 @@ class VisaTransport(Transport):
             raise RuntimeError("VISA connection is not open.")
         return self._resource.read_raw()
 
+    def read_binary_response(self) -> bytes:
+        """Read a complete IEEE 488.2 block even when VISA returns an early chunk."""
+        if not self.is_open:
+            raise RuntimeError("VISA connection is not open.")
+        try:
+            response = bytearray(self._resource.read_raw())
+        except Exception as exc:
+            raise BinaryResponseError(
+                "VISA binary transfer failed before the IEEE header was received."
+            ) from exc
+        total_length = _ieee_binary_response_length(response)
+        while total_length is None or len(response) < total_length:
+            if total_length is None:
+                requested_bytes = int(getattr(self._resource, "chunk_size", 20 * 1024))
+            else:
+                # Ask for the remaining block plus a possible CR/LF terminator so it
+                # cannot be left queued ahead of the next SCPI response.
+                requested_bytes = total_length - len(response) + 2
+            try:
+                chunk = self._resource.read_raw(size=max(2, requested_bytes))
+            except Exception as exc:
+                expected = "a complete IEEE header" if total_length is None else f"{total_length:,} bytes"
+                raise BinaryResponseError(
+                    f"VISA binary transfer stopped after {len(response):,} bytes; "
+                    f"expected {expected}."
+                ) from exc
+            if not chunk:
+                expected = "the IEEE header" if total_length is None else f"{total_length:,} bytes"
+                raise BinaryResponseError(
+                    f"VISA binary response ended before {expected} was received."
+                )
+            response.extend(chunk)
+            total_length = _ieee_binary_response_length(response)
+        # The DHO may include a line terminator or USBTMC padding after the declared
+        # block. It has been consumed from the transport, but it is not part of the
+        # IEEE response and must not be interpreted as a second block.
+        return bytes(response[:total_length])
+
+    def recover_binary_response(self) -> None:
+        """Clear a failed VISA transfer, reopening the session if clear is unavailable."""
+        if not self.is_open:
+            raise RuntimeError("VISA connection is not open.")
+        clear = getattr(self._resource, "clear", None)
+        if callable(clear):
+            try:
+                clear()
+                return
+            except Exception:
+                pass
+        self.close()
+        self.open()
+
     @property
     def is_open(self) -> bool:
         if self._resource is None:
             return False
         return not bool(getattr(self._resource, "is_closed", False))
+
+
+def _ieee_binary_response_length(response: bytes | bytearray) -> int | None:
+    """Return the end offset of the first definite-length IEEE block when known."""
+    offset = 0
+    while offset < len(response) and response[offset] in b"\r\n ":
+        offset += 1
+    if len(response) < offset + 2:
+        return None
+    if response[offset : offset + 1] != b"#":
+        preview = bytes(response[offset : offset + 16]).hex(" ")
+        raise BinaryResponseError(
+            "VISA binary response does not start with an IEEE block header "
+            f"(prefix: {preview or 'empty'})."
+        )
+    digits_byte = response[offset + 1 : offset + 2]
+    if not digits_byte.isdigit() or digits_byte == b"0":
+        raise BinaryResponseError("VISA binary response has an invalid definite-length header.")
+    length_digits = int(digits_byte)
+    header_end = offset + 2 + length_digits
+    if len(response) < header_end:
+        return None
+    length_field = response[offset + 2 : header_end]
+    if not length_field.isdigit():
+        raise BinaryResponseError("VISA binary response has an invalid byte-count field.")
+    return header_end + int(length_field)
+
+
+class BinaryResponseError(ValueError):
+    """The transport received an invalid or interrupted IEEE binary response."""
