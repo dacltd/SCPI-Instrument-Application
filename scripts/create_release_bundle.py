@@ -56,7 +56,7 @@ def create_bundle(
     )
     digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
     checksum_path = output_dir / f"{archive_path.name}.sha256"
-    checksum_path.write_text(f"{digest}  {archive_path.name}\n", encoding="ascii")
+    checksum_path.write_bytes(f"{digest}  {archive_path.name}\n".encode("ascii"))
 
     shutil.rmtree(staging_root)
     return archive_path, checksum_path, metadata_path
