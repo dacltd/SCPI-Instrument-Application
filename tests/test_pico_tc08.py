@@ -1,14 +1,17 @@
 """Tests for the PicoLog USB TC-08 adapter and worker."""
 
 import threading
+from unittest.mock import Mock, patch
 
 import pytest
 
+import dmm_app.pico_tc08 as pico_tc08
 from dmm_app.clock import AcquisitionClock
 from dmm_app.models import MeasurementFunction
 from dmm_app.pico_tc08 import (
     PicoTC08Device,
     PicoTC08Error,
+    PicoTC08Library,
     PicoTC08Measurement,
     PicoTC08Settings,
     PicoTC08Worker,
@@ -50,6 +53,83 @@ class FakeTC08Library:
 
     def formatted_info(self, _handle: int) -> str:
         return "PicoLog USB TC-08\nSerial: TC08-TEST"
+
+
+def test_windows_driver_candidates_prefer_64_bit_sdk_and_ignore_x86_discovery() -> None:
+    environment = {
+        "ProgramW6432": r"C:\Program Files",
+        "ProgramFiles": r"C:\Program Files",
+        "ProgramFiles(x86)": r"C:\Program Files (x86)",
+    }
+    x86_driver = r"C:\Program Files (x86)\Pico Technology\SDK\lib\usbtc08.dll"
+
+    candidates, detected_x86 = PicoTC08Library._windows_driver_candidates(
+        environment, x86_driver
+    )
+
+    assert candidates[0] == r"C:\Program Files\Pico Technology\SDK\lib\usbtc08.dll"
+    assert x86_driver not in candidates
+    assert detected_x86 == x86_driver
+
+
+def test_windows_loader_uses_explicit_64_bit_sdk_directory() -> None:
+    environment = {
+        "ProgramW6432": r"C:\Program Files",
+        "ProgramFiles": r"C:\Program Files",
+        "ProgramFiles(x86)": r"C:\Program Files (x86)",
+    }
+    x64_driver = r"C:\Program Files\Pico Technology\SDK\lib\usbtc08.dll"
+    x86_driver = r"C:\Program Files (x86)\Pico Technology\SDK\lib\usbtc08.dll"
+    loaded_dll = object()
+    directory_handle = Mock()
+    library = PicoTC08Library.__new__(PicoTC08Library)
+    library._dll_directory_handles = []
+
+    with (
+        patch.object(pico_tc08.os, "name", "nt"),
+        patch.dict(pico_tc08.os.environ, environment, clear=True),
+        patch.object(pico_tc08, "find_library", return_value=x86_driver),
+        patch.object(pico_tc08.os.path, "isfile", side_effect=lambda path: path == x64_driver),
+        patch.object(
+            pico_tc08.os,
+            "add_dll_directory",
+            return_value=directory_handle,
+            create=True,
+        ) as add_directory,
+        patch.object(pico_tc08.ctypes, "WinDLL", return_value=loaded_dll, create=True) as load,
+    ):
+        result = library._load_driver()
+
+    assert result is loaded_dll
+    add_directory.assert_called_once_with(r"C:\Program Files\Pico Technology\SDK\lib")
+    load.assert_called_once_with(x64_driver)
+    assert library._dll_directory_handles == [directory_handle]
+
+
+def test_windows_loader_reports_detected_32_bit_sdk() -> None:
+    environment = {
+        "ProgramW6432": r"C:\Program Files",
+        "ProgramFiles": r"C:\Program Files",
+        "ProgramFiles(x86)": r"C:\Program Files (x86)",
+    }
+    x86_driver = r"C:\Program Files (x86)\Pico Technology\SDK\lib\usbtc08.dll"
+    library = PicoTC08Library.__new__(PicoTC08Library)
+    library._dll_directory_handles = []
+
+    with (
+        patch.object(pico_tc08.os, "name", "nt"),
+        patch.dict(pico_tc08.os.environ, environment, clear=True),
+        patch.object(pico_tc08, "find_library", return_value=x86_driver),
+        patch.object(pico_tc08.os.path, "isfile", side_effect=lambda path: path == x86_driver),
+        patch.object(
+            pico_tc08.ctypes,
+            "WinDLL",
+            side_effect=OSError("module not found"),
+            create=True,
+        ),
+    ):
+        with pytest.raises(PicoTC08Error, match="32-bit SDK installation was detected"):
+            library._load_driver()
 
 
 def test_device_configures_all_channels_and_reads_temperatures() -> None:

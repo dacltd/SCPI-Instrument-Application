@@ -28,6 +28,10 @@ PicoSDK** on the Windows PC before starting the app. The application uses the
 installed `usbtc08.dll`; the Pico driver is not redistributed in the GitHub
 artifact. PicoSDK is available from the official
 [Pico Technology downloads page](https://www.picotech.com/downloads).
+For a 64-bit installation, the DLL is normally at
+`C:\Program Files\Pico Technology\SDK\lib\usbtc08.dll`. A DLL under
+`C:\Program Files (x86)` is normally the 32-bit SDK and cannot be loaded by
+this 64-bit application.
 
 ## Run from source
 
