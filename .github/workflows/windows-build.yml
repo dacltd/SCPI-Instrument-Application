@@ -1,0 +1,101 @@
+name: Windows test and application build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-package:
+    name: Test and package Windows application
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.23"
+          enable-cache: true
+
+      - name: Synchronize locked dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Check lint
+        run: uv run --frozen ruff check .
+
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >
+          uv run --frozen pytest
+          --junitxml=test-results/pytest-windows.xml
+
+      - name: Read application version
+        id: version
+        shell: pwsh
+        run: |
+          $version = uv run --frozen python -c "from dmm_app import __version__; print(__version__)"
+          "value=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build Windows application
+        run: >
+          uv run --frozen pyinstaller
+          --noconfirm
+          --clean
+          packaging/scpi-lab-instrument-app.spec
+
+      - name: Smoke-test packaged executable
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath ".\dist\SCPI Lab Instrument App\SCPI Lab Instrument App.exe" `
+            -ArgumentList "--smoke-test" `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Packaged executable smoke test failed with exit code $($process.ExitCode)"
+          }
+
+      - name: Create application bundle
+        run: >
+          uv run --frozen python scripts/create_release_bundle.py
+          --dist-dir "dist/SCPI Lab Instrument App"
+          --output-dir release
+          --version "${{ steps.version.outputs.value }}"
+          --commit "${{ github.sha }}"
+          --run-number "${{ github.run_number }}"
+
+      - name: Upload Windows application
+        uses: actions/upload-artifact@v7
+        with:
+          name: SCPI-Lab-Instrument-App-${{ steps.version.outputs.value }}-windows-x64
+          path: release/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Windows test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-test-results-${{ github.run_number }}
+          path: test-results/
+          if-no-files-found: warn
+          retention-days: 30

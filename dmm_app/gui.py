@@ -1541,7 +1541,7 @@ class InstrumentPanel(QGroupBox):
 
 
 class DMMAppWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, *, discover_endpoints: bool = True):
         super().__init__()
         self.setWindowTitle("SCPI Lab Instrument Monitor")
         self.resize(1500, 920)
@@ -1556,7 +1556,8 @@ class DMMAppWindow(QMainWindow):
         self._serial_endpoints: list[str] = []
         self._visa_endpoints: list[str] = []
         self._build_ui()
-        self._refresh_endpoints()
+        if discover_endpoints:
+            self._refresh_endpoints()
 
         self._event_timer = QTimer(self)
         self._event_timer.setInterval(50)

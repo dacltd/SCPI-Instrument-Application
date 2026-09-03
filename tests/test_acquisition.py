@@ -1253,8 +1253,7 @@ class GuiTests(unittest.TestCase):
                 window._panels[0]._logging_checkbox.setChecked(True)
             self.assertEqual(choose_individual.call_count, 1)
             self.assertEqual(window._panel_log_paths, {0: individual_path})
-
-        window.close()
+            window.close()
         self.app.processEvents()
 
     def test_logging_selection_returns_to_off_when_file_choice_is_cancelled(self):
