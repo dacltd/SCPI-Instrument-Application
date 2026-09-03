@@ -2,13 +2,14 @@
 
 ## Purpose
 
-Monitor up to four SCPI or raw serial devices in one desktop window and correlate their data in a shared timestamped CSV log.
+Monitor up to four SCPI, PicoSDK, or raw serial devices in one desktop window and correlate their data in a shared timestamped CSV log.
 
 ## Supported profiles
 
 - Multicomp Pro MP730889 DMM over serial SCPI
 - OWON SPE6103 PSU over serial SCPI
 - RIGOL DHO804 oscilloscope over VISA USBTMC or LAN
+- PicoLog USB TC-08 thermocouple logger through the native PicoSDK driver
 - Generic line-oriented raw serial device
 
 ## Installation
@@ -26,6 +27,15 @@ Windows may show a SmartScreen warning because this initial build is not
 code-signed. VISA USB devices must have a compatible Windows driver. The bundle
 contains PyVISA-py, PyUSB, and libusb, and it can also use an installed vendor
 VISA runtime such as NI-VISA.
+
+The PicoLog USB TC-08 needs Pico Technology's **64-bit PicoSDK** installed on
+the Windows PC. Download it from the official
+[Pico Technology downloads page](https://www.picotech.com/downloads), select
+PicoLog TC-08 and the 64-bit SDK, install it, and then restart this application.
+The GitHub application bundle calls the installed `usbtc08.dll` directly; it
+does not bundle or silently install Pico's driver. Installing PicoLog software
+may also install the driver, but installing the 64-bit PicoSDK is the explicit
+supported setup.
 
 ### Run from source
 
@@ -93,6 +103,7 @@ Click `Save config…` to store the complete four-panel workspace in a readable,
 - Measurement rows and sources, acquisition output modes and intervals.
 - Text/Graph selection, graph range and the remembered expanded/collapsed sections.
 - All DHO804 setup fields and logging-coverage goal.
+- TC-08 mains rejection, temperature units, and all eight thermocouple types.
 - Shared/individual logging mode, panel logging selections and their CSV destinations.
 
 Click `Load config…` and select a saved `.json` file to restore the workspace. Stop acquisition, finish any DHO804 Tools operation and disconnect every instrument first; the app refuses to replace a live panel configuration. The complete file is checked for the supported format, version, profiles, measurements and control selections before it is applied.
@@ -108,6 +119,31 @@ Loading is deliberately non-operational: devices remain disconnected, workers do
 5. Select the measurement rows and polling interval.
 
 The MP730889 is intentionally limited to one row. The SPE6103 can monitor voltage and current in the same cycle.
+
+## Connect a PicoLog USB TC-08
+
+1. Install the 64-bit PicoSDK on Windows, connect one TC-08 by USB, and close
+   PicoLog or any other program that may already have the logger open.
+2. Select `PicoLog USB TC-08` in a panel.
+3. Expand `PicoLog TC-08 Setup`. Choose 50 or 60 Hz mains rejection, choose the
+   display units, and select the thermocouple type for every connected channel.
+   Leave unused channels as `Disabled` to reduce conversion time. Channel 1
+   defaults to Type K.
+4. In `Measurement`, add the channels you want to display or log. `Cold
+   junction` is also available as a measurement source. Every selected physical
+   channel must be enabled in the setup section.
+5. Click `Connect`. The first available USB TC-08 is opened and its driver,
+   hardware, serial, and calibration information is shown in the panel output.
+6. Click `Snapshot` for one complete conversion or `Start` for repeated
+   conversions. Enable `Log this instrument` to include those readings in the
+   individual or shared CSV.
+
+The TC-08 converts enabled channels sequentially. The panel reports the
+driver's minimum conversion time after connection. A short application interval
+does not make the hardware convert faster: each repeated read completes a full
+on-demand conversion, then waits for any remaining configured interval. This
+first integration supports one TC-08 per panel selection and opens the first
+available unit.
 
 ## Connect a RIGOL DHO804
 
@@ -276,7 +312,7 @@ timestamp,elapsed_seconds,acquisition_run,instrument_window,measurement_slot,dev
 - `elapsed_seconds` is derived from the shared monotonic clock with nine decimal places.
 - `acquisition_run` increments whenever Start All resets elapsed time, so repeated runs in one file remain distinguishable. Individually started readings before the first Start All use run 0.
 - `instrument_window` and `measurement_slot` are 1-based.
-- `connection` identifies the serial port or VISA resource.
+- `connection` identifies the serial port, VISA resource, or PicoSDK USB connection.
 - `raw_response` preserves exactly what was decoded from the instrument, excluding a raw serial line terminator.
 - For a waveform-capture row, `raw_response` contains the associated RAW `.bin` path rather than the waveform samples themselves.
 
@@ -289,6 +325,13 @@ Events collected during each UI queue drain are sorted by their elapsed timestam
 - No serial ports: check the cable, adapter driver, OS permissions, then click `Refresh all connections`.
 - No VISA resources: confirm the USB device/LAN interface is enabled on the scope. A known VISA resource can be entered manually.
 - PyVISA backend error: reactivate the environment and run `python -m pip install -r requirements.txt`.
+- TC-08 driver not found: install the 64-bit PicoSDK, then restart the app. A
+  32-bit SDK cannot be loaded by this 64-bit Windows application.
+- TC-08 device not found: connect the USB logger directly, close PicoLog and
+  other programs using it, then reconnect. Only one application can hold a
+  TC-08 handle at a time.
+- TC-08 channel reports `OVER-RANGE`: check thermocouple wiring and type, and
+  confirm the input is within the logger and thermocouple range.
 - Instrument mismatch: select the profile matching the connected device and reconnect.
 - DHO804 returns an invalid/overflow value: enable the selected channel, ensure a waveform is being acquired, and check vertical/timebase settings.
 - Single capture times out: confirm that the waveform crosses the selected edge and trigger level, or increase the timeout.
@@ -304,4 +347,7 @@ Events collected during each UI queue drain are sorted by their elapsed timestam
 - Confirm whether software receive timestamps provide enough accuracy for the SMPS switching investigation.
 - Validate optimiser plans against `:ACQuire:SRATe?`, preamble `x_increment`, and measured trigger-to-trigger timing on the physical DHO804 over both USB and LAN.
 - Run DHO804 Tools with a varying input signal and validate that replay-frame selection produces distinct full RAW WORD payloads, usable hardware timestamps, and sensible inter-frame spacing before enabling production hardware burst/segmented capture.
+- Validate TC-08 driver discovery, device information, all required thermocouple
+  types, overflow reporting, conversion cadence, and long-duration stop/reconnect
+  behavior on the physical Windows bench system.
 - If software timing is insufficient, define the required accuracy and shared trigger wiring before adding cross-device external-trigger synchronization.
