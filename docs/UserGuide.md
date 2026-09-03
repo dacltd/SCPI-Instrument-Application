@@ -13,6 +13,22 @@ Monitor up to four SCPI or raw serial devices in one desktop window and correlat
 
 ## Installation
 
+### Windows application
+
+The GitHub Actions workflow produces a self-contained Windows x64 application;
+Python is not required on the target PC. Open the repository's **Actions**
+page, select the latest successful **Windows test and application build**, and
+download the `SCPI-Lab-Instrument-App-<version>-windows-x64` artifact. Extract
+the artifact and the application ZIP inside it, then run
+`SCPI Lab Instrument App.exe`.
+
+Windows may show a SmartScreen warning because this initial build is not
+code-signed. VISA USB devices must have a compatible Windows driver. The bundle
+contains PyVISA-py, PyUSB, and libusb, and it can also use an installed vendor
+VISA runtime such as NI-VISA.
+
+### Run from source
+
 Python 3.12 or newer is recommended.
 
 ```bash

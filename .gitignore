@@ -1,7 +1,12 @@
 .venv/
 __pycache__/
 *.pyc
+*.egg-info/
 .DS_Store
+build/
+dist/
+release/
+test-results/
 
 # Local oscilloscope captures and generated waveform logging output
 dho804_*.bin
