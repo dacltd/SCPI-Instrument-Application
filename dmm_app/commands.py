@@ -141,6 +141,33 @@ INSTRUMENT_PROFILES: dict[InstrumentType, InstrumentProfile] = {
             ),
         },
     ),
+    InstrumentType.PICOLOG_TC08: InstrumentProfile(
+        instrument=InstrumentType.PICOLOG_TC08,
+        protocol=ProtocolType.PICOSDK,
+        connection_kind=ConnectionKind.PICOSDK,
+        idn_query="",
+        idn_expected_tokens=(),
+        sources=(
+            "Channel 1",
+            "Channel 2",
+            "Channel 3",
+            "Channel 4",
+            "Channel 5",
+            "Channel 6",
+            "Channel 7",
+            "Channel 8",
+            "Cold junction",
+        ),
+        maximum_rows=9,
+        commands={
+            MeasurementFunction.TEMPERATURE: MeasurementCommand(
+                function=MeasurementFunction.TEMPERATURE,
+                prepare_commands=(),
+                query_command="",
+                unit="°C",
+            )
+        },
+    ),
     InstrumentType.RAW_SERIAL: InstrumentProfile(
         instrument=InstrumentType.RAW_SERIAL,
         protocol=ProtocolType.RAW_SERIAL,

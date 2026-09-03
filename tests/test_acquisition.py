@@ -790,6 +790,19 @@ class GuiTests(unittest.TestCase):
                 scope._plot_range_combo.findData("full")
             )
 
+            tc08 = source._panels[2]
+            tc08._instrument_combo.setCurrentText(InstrumentType.PICOLOG_TC08.value)
+            tc08._tc08_mains_combo.setCurrentIndex(tc08._tc08_mains_combo.findData(60))
+            tc08._tc08_units_combo.setCurrentIndex(tc08._tc08_units_combo.findData("F"))
+            tc08._tc08_channel_type_combos[0].setCurrentIndex(
+                tc08._tc08_channel_type_combos[0].findData("")
+            )
+            tc08._tc08_channel_type_combos[7].setCurrentIndex(
+                tc08._tc08_channel_type_combos[7].findData("T")
+            )
+            tc08._measurement_rows[0].source_combo.setCurrentText("Channel 8")
+            tc08._tc08_section.set_expanded(False)
+
             with patch(
                 "dmm_app.gui.QFileDialog.getSaveFileName",
                 return_value=(shared_log_path, "CSV files (*.csv)"),
@@ -838,6 +851,20 @@ class GuiTests(unittest.TestCase):
             self.assertEqual(restored_scope._plot_range_combo.currentData(), "full")
             self.assertFalse(restored_scope._scope_safety_checkbox.isChecked())
             self.assertIsNone(restored_scope._scope_setup_applied)
+
+            restored_tc08 = restored._panels[2]
+            self.assertEqual(restored_tc08._selected_instrument(), InstrumentType.PICOLOG_TC08)
+            self.assertEqual(restored_tc08._endpoint_combo.currentText(), "First available USB TC-08")
+            self.assertEqual(restored_tc08._tc08_mains_combo.currentData(), 60)
+            self.assertEqual(restored_tc08._tc08_units_combo.currentData(), "F")
+            self.assertEqual(
+                [combo.currentData() for combo in restored_tc08._tc08_channel_type_combos],
+                ["", "", "", "", "", "", "", "T"],
+            )
+            self.assertEqual(
+                restored_tc08._measurement_rows[0].source_combo.currentText(), "Channel 8"
+            )
+            self.assertFalse(restored_tc08._tc08_section.is_expanded)
 
             self.assertTrue(restored._log_checkbox.isChecked())
             self.assertEqual(restored._shared_log_path, shared_log_path)
@@ -1317,6 +1344,30 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(panel._validated_interval_seconds(), 0.0)
         self.assertIn("125 MSa/s", panel._scope_logging_estimate_label.text())
         self.assertIn("4,000 cycles", panel._scope_logging_estimate_label.text())
+        window.close()
+        self.app.processEvents()
+
+    def test_tc08_profile_exposes_channel_types_units_and_measurement_rows(self):
+        window = DMMAppWindow()
+        panel = window._panels[0]
+        panel._instrument_combo.setCurrentText(InstrumentType.PICOLOG_TC08.value)
+
+        self.assertFalse(panel._tc08_section.isHidden())
+        self.assertTrue(panel._scope_section.isHidden())
+        self.assertEqual(panel._endpoint_label.text(), "Device")
+        self.assertEqual(panel._endpoint_combo.currentText(), "First available USB TC-08")
+        self.assertEqual(panel._measurement_rows[0].source_combo.currentText(), "Channel 1")
+        self.assertEqual(panel._tc08_channel_type_combos[0].currentData(), "K")
+        self.assertEqual(panel._tc08_units_combo.currentData(), "C")
+
+        panel._tc08_channel_type_combos[1].setCurrentIndex(
+            panel._tc08_channel_type_combos[1].findData("J")
+        )
+        panel._add_button.click()
+        self.assertEqual(panel._measurement_rows[1].source_combo.currentText(), "Channel 2")
+        configuration = panel.configuration_dict()
+        self.assertEqual(configuration["tc08"]["channel_types"][:2], ["K", "J"])
+
         window.close()
         self.app.processEvents()
 

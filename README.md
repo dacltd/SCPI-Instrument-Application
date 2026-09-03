@@ -1,7 +1,7 @@
 # SCPI Lab Instrument App
 
-A PySide6 desktop application for monitoring up to four SCPI or raw serial
-devices and recording their measurements on one shared timeline.
+A PySide6 desktop application for monitoring up to four SCPI, PicoSDK, or raw
+serial devices and recording their measurements on one shared timeline.
 
 ## Download the Windows application
 
@@ -22,6 +22,12 @@ from this repository's successful workflow run.
 For USB VISA instruments, the bundle includes the pure-Python PyVISA backend,
 PyUSB, and libusb. The Windows device must still have a compatible USB driver.
 An instrument vendor's VISA runtime (for example, NI-VISA) can also be used.
+
+To use a PicoLog USB TC-08, install Pico Technology's current **64-bit
+PicoSDK** on the Windows PC before starting the app. The application uses the
+installed `usbtc08.dll`; the Pico driver is not redistributed in the GitHub
+artifact. PicoSDK is available from the official
+[Pico Technology downloads page](https://www.picotech.com/downloads).
 
 ## Run from source
 

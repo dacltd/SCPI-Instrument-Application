@@ -48,6 +48,14 @@ from dmm_app.oscilloscope import (
     build_dho804_setup_commands,
     optimise_waveform_logging,
 )
+from dmm_app.pico_tc08 import (
+    TC08_TEMPERATURE_UNITS,
+    TC08_THERMOCOUPLE_TYPES,
+    PicoTC08Device,
+    PicoTC08Measurement,
+    PicoTC08Settings,
+    PicoTC08Worker,
+)
 from dmm_app.scpi import SCPIClient
 from dmm_app.scope_tools import DHO804ToolsDialog, ScopeToolsState
 from dmm_app.transport import SerialTransport, Transport, VisaTransport
@@ -127,20 +135,21 @@ class InstrumentPanel(QGroupBox):
         self._endpoint_cache_provider = endpoint_cache_provider
         self._logging_selection_sink = logging_selection_sink
         self._waveform_output_directory_provider = waveform_output_directory_provider
-        self._transport: Transport | None = None
+        self._transport: Transport | PicoTC08Device | None = None
         self._scpi: SCPIClient | None = None
         self._worker: (
             PollingWorker
             | RawSerialWorker
             | WaveformCaptureWorker
             | RepeatedWaveformCaptureWorker
+            | PicoTC08Worker
             | None
         ) = None
         self._scope_setup_applied: OscilloscopeSetup | None = None
         self._device_idn = "UNKNOWN"
         self._measurement_rows: list[MeasurementRow] = []
         self._plot_controls_waveform = False
-        self._sections_before_graph: tuple[bool, bool, bool] | None = None
+        self._sections_before_graph: tuple[bool, bool, bool, bool] | None = None
         self._stream_requested = False
         self._scope_tools_dialog: DHO804ToolsDialog | None = None
 
@@ -404,6 +413,49 @@ class InstrumentPanel(QGroupBox):
         self._scope_section.set_expanded(False)
         layout.addWidget(self._scope_section)
 
+        tc08_content = QGroupBox()
+        tc08_layout = QGridLayout(tc08_content)
+        tc08_layout.setContentsMargins(6, 6, 6, 6)
+        tc08_layout.setHorizontalSpacing(8)
+        tc08_layout.setVerticalSpacing(4)
+
+        tc08_layout.addWidget(QLabel("Mains rejection"), 0, 0)
+        self._tc08_mains_combo = QComboBox()
+        self._tc08_mains_combo.addItem("50 Hz", 50)
+        self._tc08_mains_combo.addItem("60 Hz", 60)
+        tc08_layout.addWidget(self._tc08_mains_combo, 0, 1)
+
+        tc08_layout.addWidget(QLabel("Temperature units"), 0, 2)
+        self._tc08_units_combo = QComboBox()
+        for code, (_, label) in TC08_TEMPERATURE_UNITS.items():
+            self._tc08_units_combo.addItem(label, code)
+        tc08_layout.addWidget(self._tc08_units_combo, 0, 3)
+
+        tc08_note = QLabel(
+            "Choose a thermocouple type to enable each channel. Add matching Temperature "
+            "rows above for the channels to display, graph, and log."
+        )
+        tc08_note.setWordWrap(True)
+        tc08_layout.addWidget(tc08_note, 1, 0, 1, 4)
+
+        self._tc08_channel_type_combos: list[QComboBox] = []
+        for offset in range(8):
+            channel = offset + 1
+            grid_row = 2 + offset // 4
+            grid_column = (offset % 4) * 2
+            tc08_layout.addWidget(QLabel(f"CH{channel}"), grid_row, grid_column)
+            combo = QComboBox()
+            combo.addItem("Disabled", "")
+            for thermocouple_type in TC08_THERMOCOUPLE_TYPES:
+                combo.addItem(f"Type {thermocouple_type}", thermocouple_type)
+            if channel == 1:
+                combo.setCurrentIndex(combo.findData("K"))
+            self._tc08_channel_type_combos.append(combo)
+            tc08_layout.addWidget(combo, grid_row, grid_column + 1)
+
+        self._tc08_section = CollapsibleSection("PicoLog TC-08 Setup", tc08_content)
+        layout.addWidget(self._tc08_section)
+
         output_controls = QHBoxLayout()
         output_controls.addStretch(1)
         self._plot_range_combo = QComboBox()
@@ -461,20 +513,23 @@ class InstrumentPanel(QGroupBox):
             self._output_stack.setCurrentWidget(self._output)
             self._view_toggle_button.setText("Graph view")
             if self._sections_before_graph is not None:
-                profile, measurement, scope = self._sections_before_graph
+                profile, measurement, scope, tc08 = self._sections_before_graph
                 self._profile_section.set_expanded(profile)
                 self._measurement_section.set_expanded(measurement)
                 self._scope_section.set_expanded(scope)
+                self._tc08_section.set_expanded(tc08)
             self._sections_before_graph = None
         else:
             self._sections_before_graph = (
                 self._profile_section.is_expanded,
                 self._measurement_section.is_expanded,
                 self._scope_section.is_expanded,
+                self._tc08_section.is_expanded,
             )
             self._profile_section.set_expanded(False)
             self._measurement_section.set_expanded(False)
             self._scope_section.set_expanded(False)
+            self._tc08_section.set_expanded(False)
             self._output_stack.setCurrentWidget(self._plot)
             self._view_toggle_button.setText("Text view")
 
@@ -515,6 +570,7 @@ class InstrumentPanel(QGroupBox):
         profile = self._selected_profile()
         has_instrument = profile.instrument != InstrumentType.NONE
         is_scope = profile.instrument == InstrumentType.RIGOL_DHO804
+        is_tc08 = profile.instrument == InstrumentType.PICOLOG_TC08
         if not is_scope and self._scope_tools_dialog is not None:
             self._shutdown_scope_tools()
         self._scope_setup_applied = None
@@ -537,14 +593,16 @@ class InstrumentPanel(QGroupBox):
         if profile.commands:
             self._add_measurement_row(next(iter(profile.commands)), self._first_source(profile))
         is_serial = profile.connection_kind == ConnectionKind.SERIAL
-        self._endpoint_label.setText("Serial port" if is_serial else "VISA resource")
+        endpoint_label = "Serial port" if is_serial else "Device" if is_tc08 else "VISA resource"
+        self._endpoint_label.setText(endpoint_label)
+        self._endpoint_combo.setEditable(not is_tc08)
         self._endpoint_label.setVisible(has_instrument)
         self._endpoint_combo.setVisible(has_instrument)
         self._baud_label.setVisible(has_instrument and is_serial)
         self._baud_combo.setVisible(has_instrument and is_serial)
         self._ending_label.setVisible(has_instrument and profile.is_raw_serial)
         self._ending_combo.setVisible(has_instrument and profile.is_raw_serial)
-        self._refresh_button.setVisible(has_instrument)
+        self._refresh_button.setVisible(has_instrument and not is_tc08)
         self._connect_button.setVisible(has_instrument)
         self._interval_label.setVisible(has_instrument and not profile.is_raw_serial)
         self._interval_input.setVisible(has_instrument and not profile.is_raw_serial)
@@ -556,6 +614,7 @@ class InstrumentPanel(QGroupBox):
         self._view_toggle_button.setVisible(has_instrument)
         self._plot_range_combo.setVisible(has_instrument)
         self._scope_section.setVisible(is_scope)
+        self._tc08_section.setVisible(is_tc08)
         self._status_label.setText("Disconnected" if has_instrument else "Select an instrument profile")
         if has_instrument:
             self._append_output(f"Loaded profile: {profile.instrument.value}.")
@@ -568,11 +627,14 @@ class InstrumentPanel(QGroupBox):
     def configuration_dict(self) -> dict[str, object]:
         graph_visible = self._output_stack.currentWidget() is self._plot
         if graph_visible and self._sections_before_graph is not None:
-            profile_expanded, measurement_expanded, scope_expanded = self._sections_before_graph
+            profile_expanded, measurement_expanded, scope_expanded, tc08_expanded = (
+                self._sections_before_graph
+            )
         else:
             profile_expanded = self._profile_section.is_expanded
             measurement_expanded = self._measurement_section.is_expanded
             scope_expanded = self._scope_section.is_expanded
+            tc08_expanded = self._tc08_section.is_expanded
         return {
             "instrument": self._selected_instrument().value,
             "connection": {
@@ -602,6 +664,7 @@ class InstrumentPanel(QGroupBox):
                     "profile": profile_expanded,
                     "measurement": measurement_expanded,
                     "oscilloscope": scope_expanded,
+                    "tc08": tc08_expanded,
                 },
             },
             "oscilloscope": {
@@ -621,6 +684,13 @@ class InstrumentPanel(QGroupBox):
                 "trigger_level_volts": self._scope_trigger_level_input.text(),
                 "trigger_timeout_seconds": self._scope_trigger_timeout_input.text(),
                 "logging_fidelity": str(self._scope_logging_fidelity_combo.currentData()),
+            },
+            "tc08": {
+                "mains_hz": self._tc08_mains_combo.currentData(),
+                "units": self._tc08_units_combo.currentData(),
+                "channel_types": [
+                    combo.currentData() for combo in self._tc08_channel_type_combos
+                ],
             },
         }
 
@@ -691,6 +761,17 @@ class InstrumentPanel(QGroupBox):
         self._scope_trigger_timeout_input.setText(str(scope["trigger_timeout_seconds"]))
         self._set_combo_data(self._scope_logging_fidelity_combo, scope["logging_fidelity"])
 
+        tc08 = configuration.get("tc08")
+        if isinstance(tc08, dict):
+            self._set_combo_data(self._tc08_mains_combo, tc08.get("mains_hz", 50))
+            self._set_combo_data(self._tc08_units_combo, tc08.get("units", "C"))
+            channel_types = tc08.get("channel_types", ["K"] + [""] * 7)
+            if isinstance(channel_types, list):
+                for combo, channel_type in zip(
+                    self._tc08_channel_type_combos, channel_types, strict=True
+                ):
+                    self._set_combo_data(combo, channel_type)
+
         # A configuration file cannot verify the present physical probe/ground connection,
         # and loading controls does not mean that those controls have been sent to the scope.
         self._scope_safety_checkbox.setChecked(False)
@@ -705,12 +786,14 @@ class InstrumentPanel(QGroupBox):
             bool(sections["profile"]),
             bool(sections["measurement"]),
             bool(sections["oscilloscope"]),
+            bool(sections.get("tc08", True)),
         )
         if view["mode"] == "graph":
             self._sections_before_graph = section_states
             self._profile_section.set_expanded(False)
             self._measurement_section.set_expanded(False)
             self._scope_section.set_expanded(False)
+            self._tc08_section.set_expanded(False)
             self._output_stack.setCurrentWidget(self._plot)
             self._view_toggle_button.setText("Text view")
         else:
@@ -718,6 +801,7 @@ class InstrumentPanel(QGroupBox):
             self._profile_section.set_expanded(section_states[0])
             self._measurement_section.set_expanded(section_states[1])
             self._scope_section.set_expanded(section_states[2])
+            self._tc08_section.set_expanded(section_states[3])
             self._output_stack.setCurrentWidget(self._output)
             self._view_toggle_button.setText("Graph view")
         self._refresh_controls()
@@ -728,6 +812,10 @@ class InstrumentPanel(QGroupBox):
         visa_resources: list[str],
         preserve_selection: bool = True,
     ) -> None:
+        if self._selected_profile().connection_kind == ConnectionKind.PICOSDK:
+            self._endpoint_combo.clear()
+            self._endpoint_combo.addItem("First available USB TC-08")
+            return
         selected = self._endpoint_combo.currentText().strip() if preserve_selection else ""
         endpoints = (
             serial_ports
@@ -1152,11 +1240,11 @@ class InstrumentPanel(QGroupBox):
         if self._selected_instrument() == InstrumentType.NONE:
             QMessageBox.information(self, "No instrument", "Select an instrument profile first.")
             return False
+        profile = self._selected_profile()
         endpoint = self._endpoint_combo.currentText().strip()
-        if not endpoint:
+        if not endpoint and profile.connection_kind != ConnectionKind.PICOSDK:
             QMessageBox.warning(self, "Connection", "Select or enter a connection endpoint first.")
             return False
-        profile = self._selected_profile()
         try:
             if profile.connection_kind == ConnectionKind.SERIAL:
                 baud = int(self._baud_combo.currentText())
@@ -1165,6 +1253,9 @@ class InstrumentPanel(QGroupBox):
                     SerialSettings(port=endpoint, baudrate=baud, timeout_seconds=timeout)
                 )
                 connection_description = f"{endpoint} @ {baud} baud"
+            elif profile.connection_kind == ConnectionKind.PICOSDK:
+                self._transport = PicoTC08Device()
+                connection_description = "PicoSDK USB"
             else:
                 visa_timeout = (
                     60.0 if profile.instrument == InstrumentType.RIGOL_DHO804 else 2.0
@@ -1174,19 +1265,32 @@ class InstrumentPanel(QGroupBox):
                 )
                 connection_description = endpoint
             self._transport.open()
-            self._scpi = None if profile.is_raw_serial else SCPIClient(self._transport)
+            if isinstance(self._transport, PicoTC08Device):
+                settings = self._tc08_settings_from_controls()
+                self._transport.configure(settings)
+                self._device_idn = self._transport.device_idn
+                connection_description += (
+                    f"; minimum conversion {self._transport.minimum_interval_ms} ms"
+                )
+                self._scpi = None
+            else:
+                self._scpi = None if profile.is_raw_serial else SCPIClient(self._transport)
             if profile.supports_identity_query:
                 self._device_idn = self._query_device_idn(announce=False)
                 if not self._validate_device_identity(profile):
                     self.disconnect_device()
                     return False
-            else:
+            elif not isinstance(self._transport, PicoTC08Device):
                 self._device_idn = endpoint
             self._connect_button.setText("Disconnect")
             self._instrument_combo.setEnabled(False)
             self._endpoint_combo.setEnabled(False)
             self._baud_combo.setEnabled(False)
             self._ending_combo.setEnabled(False)
+            self._tc08_mains_combo.setEnabled(False)
+            self._tc08_units_combo.setEnabled(False)
+            for combo in self._tc08_channel_type_combos:
+                combo.setEnabled(False)
             self._status_label.setText(f"Connected: {connection_description}")
             self._append_output(f"Connected to {connection_description}. ID: {self._device_idn}")
             self._scope_setup_applied = None
@@ -1216,7 +1320,7 @@ class InstrumentPanel(QGroupBox):
                 QMessageBox.information(
                     self,
                     "Capture still stopping",
-                    "The current waveform transfer must finish before disconnecting. "
+                    "The current device operation must finish before disconnecting. "
                     "Try Disconnect again when the panel reports that logging has stopped.",
                 )
             return
@@ -1228,6 +1332,10 @@ class InstrumentPanel(QGroupBox):
         self._endpoint_combo.setEnabled(True)
         self._baud_combo.setEnabled(True)
         self._ending_combo.setEnabled(True)
+        self._tc08_mains_combo.setEnabled(True)
+        self._tc08_units_combo.setEnabled(True)
+        for combo in self._tc08_channel_type_combos:
+            combo.setEnabled(True)
         self._status_label.setText("Disconnected")
         if announce:
             self._append_output("Disconnected.")
@@ -1283,6 +1391,34 @@ class InstrumentPanel(QGroupBox):
             setup_commands.extend(command.prepare_commands)
         return requests, list(dict.fromkeys(setup_commands))
 
+    def _tc08_settings_from_controls(self) -> PicoTC08Settings:
+        return PicoTC08Settings(
+            mains_hz=int(self._tc08_mains_combo.currentData()),
+            units=str(self._tc08_units_combo.currentData()),
+            channel_types=tuple(
+                str(combo.currentData()) for combo in self._tc08_channel_type_combos
+            ),
+        )
+
+    def _build_tc08_measurements(self) -> list[PicoTC08Measurement]:
+        settings = self._tc08_settings_from_controls()
+        measurements: list[PicoTC08Measurement] = []
+        for slot_index, row in enumerate(self._measurement_rows):
+            _, source = self._measurement_key(row)
+            channel = 0 if source == "Cold junction" else int(source.removeprefix("Channel "))
+            if channel and not settings.channel_types[channel - 1]:
+                raise ValueError(
+                    f"{source} is disabled. Select its thermocouple type in PicoLog TC-08 Setup."
+                )
+            measurements.append(
+                PicoTC08Measurement(
+                    slot_index=slot_index,
+                    channel=channel,
+                    source=source,
+                )
+            )
+        return measurements
+
     def _validated_interval_seconds(self) -> float | None:
         try:
             interval_ms = int(self._interval_input.text().strip())
@@ -1333,6 +1469,34 @@ class InstrumentPanel(QGroupBox):
                 connection=endpoint,
                 terminator=LINE_ENDINGS[self._ending_combo.currentText()],
                 on_reading=lambda reading: self._event_sink("reading", self.instrument_index, reading),
+                on_error=lambda error: self._event_sink("error", self.instrument_index, error),
+                start_gate=start_gate,
+            )
+        elif profile.instrument == InstrumentType.PICOLOG_TC08:
+            interval_seconds = self._validated_interval_seconds()
+            if interval_seconds is None:
+                return False
+            try:
+                settings = self._tc08_settings_from_controls()
+                measurements = self._build_tc08_measurements()
+            except (TypeError, ValueError) as exc:
+                QMessageBox.warning(self, "TC-08 configuration", str(exc))
+                return False
+            if not isinstance(self._transport, PicoTC08Device):
+                QMessageBox.critical(self, "TC-08", "The PicoSDK device is not available.")
+                return False
+            self._worker = PicoTC08Worker(
+                device=self._transport,
+                clock=self._clock,
+                instrument_index=self.instrument_index,
+                connection="PicoSDK USB",
+                device_idn=self._device_idn,
+                measurements=measurements,
+                unit=settings.unit_label,
+                interval_seconds=interval_seconds,
+                on_reading=lambda reading: self._event_sink(
+                    "reading", self.instrument_index, reading
+                ),
                 on_error=lambda error: self._event_sink("error", self.instrument_index, error),
                 start_gate=start_gate,
             )
@@ -1413,6 +1577,8 @@ class InstrumentPanel(QGroupBox):
             )
         if profile.is_raw_serial:
             message = "Listening started."
+        elif isinstance(self._worker, PicoTC08Worker):
+            message = "TC-08 temperature acquisition started."
         elif isinstance(self._worker, RepeatedWaveformCaptureWorker):
             message = f"Repeated RAW waveform logging started. Files: {repeated_output_directory}"
         else:
@@ -1429,11 +1595,16 @@ class InstrumentPanel(QGroupBox):
         if self._worker and self._worker.is_alive():
             self._worker.stop()
             self._worker.join(timeout=1.5)
-            if isinstance(self._worker, RepeatedWaveformCaptureWorker) and self._worker.is_alive():
+            if isinstance(
+                self._worker, (RepeatedWaveformCaptureWorker, PicoTC08Worker)
+            ) and self._worker.is_alive():
                 if announce:
-                    self._append_output(
-                        "Stop requested; waiting for the current waveform transfer to finish."
+                    operation = (
+                        "waveform transfer"
+                        if isinstance(self._worker, RepeatedWaveformCaptureWorker)
+                        else "TC-08 conversion"
                     )
+                    self._append_output(f"Stop requested; waiting for the current {operation}.")
                 self._refresh_controls()
                 return
             if announce:
@@ -1442,6 +1613,40 @@ class InstrumentPanel(QGroupBox):
         self._refresh_controls()
 
     def take_snapshot(self, _checked: bool = False) -> None:
+        if self._selected_instrument() == InstrumentType.PICOLOG_TC08:
+            if not isinstance(self._transport, PicoTC08Device):
+                QMessageBox.warning(self, "Not connected", "Connect to the TC-08 first.")
+                return
+            try:
+                settings = self._tc08_settings_from_controls()
+                measurements = self._build_tc08_measurements()
+                temperatures, overflow_flags = self._transport.read_temperatures()
+                for measurement in measurements:
+                    value = temperatures[measurement.channel]
+                    over_range = bool(overflow_flags & (1 << measurement.channel))
+                    timestamp, elapsed_seconds, acquisition_run = self._clock.capture()
+                    self._event_sink(
+                        "reading",
+                        self.instrument_index,
+                        Reading(
+                            timestamp=timestamp,
+                            elapsed_seconds=elapsed_seconds,
+                            acquisition_run=acquisition_run,
+                            instrument_index=self.instrument_index,
+                            slot_index=measurement.slot_index,
+                            instrument=InstrumentType.PICOLOG_TC08,
+                            connection="PicoSDK USB",
+                            device_idn=self._device_idn,
+                            function=MeasurementFunction.TEMPERATURE,
+                            source=measurement.source,
+                            raw_response="OVER-RANGE" if over_range else f"{value:.7g}",
+                            value=None if over_range else value,
+                            unit=settings.unit_label,
+                        ),
+                    )
+            except Exception as exc:  # pragma: no cover - hardware dependency
+                QMessageBox.critical(self, "TC-08 snapshot failed", str(exc))
+            return
         if not self._scpi:
             QMessageBox.warning(self, "Not connected", "Connect to this instrument first.")
             return
@@ -1799,6 +2004,10 @@ class DMMAppWindow(QMainWindow):
                 cls._configuration_bool(
                     sections.get(section_name), f"{prefix}.view.sections.{section_name}"
                 )
+            if "tc08" in sections:
+                cls._configuration_bool(
+                    sections.get("tc08"), f"{prefix}.view.sections.tc08"
+                )
 
             scope = cls._configuration_mapping(
                 panel.get("oscilloscope"), f"{prefix}.oscilloscope"
@@ -1833,6 +2042,40 @@ class DMMAppWindow(QMainWindow):
                 "trigger_timeout_seconds",
             ):
                 cls._configuration_string(scope.get(field), f"{prefix}.oscilloscope.{field}")
+
+            tc08_value = panel.get("tc08")
+            if instrument == InstrumentType.PICOLOG_TC08 and not isinstance(tc08_value, dict):
+                raise ValueError(f"{prefix}.tc08 must be a JSON object.")
+            if tc08_value is not None:
+                tc08 = cls._configuration_mapping(tc08_value, f"{prefix}.tc08")
+                if tc08.get("mains_hz") not in {50, 60}:
+                    raise ValueError(f"{prefix}.tc08.mains_hz must be 50 or 60.")
+                unit = cls._configuration_string(tc08.get("units"), f"{prefix}.tc08.units")
+                if unit not in TC08_TEMPERATURE_UNITS:
+                    raise ValueError(f"{prefix}.tc08.units is not supported.")
+                channel_types = tc08.get("channel_types")
+                if not isinstance(channel_types, list) or len(channel_types) != 8:
+                    raise ValueError(f"{prefix}.tc08.channel_types must contain eight entries.")
+                for channel_index, channel_type_value in enumerate(channel_types):
+                    channel_type = cls._configuration_string(
+                        channel_type_value,
+                        f"{prefix}.tc08.channel_types[{channel_index}]",
+                    )
+                    if channel_type and channel_type not in TC08_THERMOCOUPLE_TYPES:
+                        raise ValueError(
+                            f"{prefix}.tc08.channel_types[{channel_index}] is not supported."
+                        )
+                if instrument == InstrumentType.PICOLOG_TC08 and not any(channel_types):
+                    raise ValueError(f"{prefix}.tc08 must enable at least one channel.")
+                if instrument == InstrumentType.PICOLOG_TC08:
+                    for _, source in measurement_keys:
+                        if source.startswith("Channel "):
+                            channel_index = int(source.removeprefix("Channel ")) - 1
+                            if not channel_types[channel_index]:
+                                raise ValueError(
+                                    f"{prefix}.measurements selects {source}, but that "
+                                    "TC-08 channel is disabled."
+                                )
 
             logging = cls._configuration_mapping(panel.get("logging"), f"{prefix}.logging")
             logging_enabled = cls._configuration_bool(
