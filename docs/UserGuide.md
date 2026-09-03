@@ -37,6 +37,13 @@ does not bundle or silently install Pico's driver. Installing PicoLog software
 may also install the driver, but installing the 64-bit PicoSDK is the explicit
 supported setup.
 
+The normal 64-bit driver location is
+`C:\Program Files\Pico Technology\SDK\lib\usbtc08.dll`. The application checks
+this location before consulting the Windows DLL search path. A driver under
+`C:\Program Files (x86)\Pico Technology\SDK\lib` belongs to the 32-bit SDK and
+cannot be loaded by the 64-bit application. Both SDK architectures can be
+installed on one 64-bit PC, but the 64-bit TC-08 component must be present.
+
 ### Run from source
 
 Python 3.12 or newer is recommended.
@@ -325,8 +332,11 @@ Events collected during each UI queue drain are sorted by their elapsed timestam
 - No serial ports: check the cable, adapter driver, OS permissions, then click `Refresh all connections`.
 - No VISA resources: confirm the USB device/LAN interface is enabled on the scope. A known VISA resource can be entered manually.
 - PyVISA backend error: reactivate the environment and run `python -m pip install -r requirements.txt`.
-- TC-08 driver not found: install the 64-bit PicoSDK, then restart the app. A
-  32-bit SDK cannot be loaded by this 64-bit Windows application.
+- TC-08 driver not found: check that
+  `C:\Program Files\Pico Technology\SDK\lib\usbtc08.dll` exists. If the DLL is
+  only under `Program Files (x86)`, install or repair the 64-bit PicoSDK with
+  USB TC-08 support selected, then restart the app. A 32-bit SDK cannot be
+  loaded by this 64-bit Windows application.
 - TC-08 device not found: connect the USB logger directly, close PicoLog and
   other programs using it, then reconnect. Only one application can hold a
   TC-08 handle at a time.

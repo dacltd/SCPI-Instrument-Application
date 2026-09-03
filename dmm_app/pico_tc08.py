@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import ntpath
 import os
 import threading
 import time
@@ -50,26 +51,105 @@ class PicoTC08Library:
     """Small ctypes wrapper around the installed 64-bit ``usbtc08`` driver."""
 
     def __init__(self, dll=None):
+        self._dll_directory_handles: list[object] = []
         self._dll = dll or self._load_driver()
         self._bind_symbols()
 
     @staticmethod
-    def _load_driver():
-        discovered = find_library("usbtc08")
-        candidates = [candidate for candidate in (discovered, "usbtc08.dll") if candidate]
+    def _windows_driver_candidates(
+        environment: dict[str, str], discovered: str | None
+    ) -> tuple[list[str], str | None]:
+        candidates: list[str] = []
+        normalized_environment = {
+            key.casefold(): value for key, value in environment.items()
+        }
+
+        sdk_override = normalized_environment.get("pico_sdk_path")
+        if sdk_override:
+            candidates.extend(
+                [
+                    ntpath.join(sdk_override, "lib", "usbtc08.dll"),
+                    ntpath.join(sdk_override, "usbtc08.dll"),
+                ]
+            )
+
+        for variable in ("programw6432", "programfiles"):
+            program_files = normalized_environment.get(variable)
+            if program_files:
+                candidates.append(
+                    ntpath.join(
+                        program_files,
+                        "Pico Technology",
+                        "SDK",
+                        "lib",
+                        "usbtc08.dll",
+                    )
+                )
+
+        program_files_x86 = normalized_environment.get("programfiles(x86)")
+        x86_candidate = (
+            ntpath.join(
+                program_files_x86,
+                "Pico Technology",
+                "SDK",
+                "lib",
+                "usbtc08.dll",
+            )
+            if program_files_x86
+            else None
+        )
+        if discovered and not (
+            x86_candidate
+            and ntpath.normcase(discovered) == ntpath.normcase(x86_candidate)
+        ):
+            candidates.append(discovered)
+        candidates.append("usbtc08.dll")
+        return list(dict.fromkeys(candidates)), x86_candidate
+
+    def _load_driver(self):
+        if os.name == "nt":
+            candidates, x86_candidate = self._windows_driver_candidates(
+                dict(os.environ), find_library("usbtc08")
+            )
+        else:
+            discovered = find_library("usbtc08")
+            candidates = [candidate for candidate in (discovered, "usbtc08") if candidate]
+            x86_candidate = None
+
         errors: list[str] = []
         for candidate in dict.fromkeys(candidates):
+            is_absolute_windows_path = os.name == "nt" and ntpath.isabs(candidate)
+            if is_absolute_windows_path and not os.path.isfile(candidate):
+                continue
+            directory_handle = None
             try:
                 if os.name == "nt":
-                    return ctypes.WinDLL(candidate)
+                    if is_absolute_windows_path and hasattr(os, "add_dll_directory"):
+                        directory_handle = os.add_dll_directory(ntpath.dirname(candidate))
+                    loaded = ctypes.WinDLL(candidate)
+                    if directory_handle is not None:
+                        self._dll_directory_handles.append(directory_handle)
+                    return loaded
                 return ctypes.CDLL(candidate)
             except OSError as exc:
-                errors.append(str(exc))
-        detail = f" ({'; '.join(errors)})" if errors else ""
-        raise PicoTC08Error(
-            "PicoSDK USB TC-08 driver was not found. Install the 64-bit PicoSDK "
-            f"for the TC-08, then restart the application{detail}."
+                errors.append(f"{candidate}: {exc}")
+                if directory_handle is not None:
+                    directory_handle.close()
+
+        message = (
+            "The 64-bit PicoSDK USB TC-08 driver could not be found or loaded. "
+            "Install the 64-bit PicoSDK with USB TC-08 support selected, then restart "
+            "the application. The expected driver location is "
+            r"C:\Program Files\Pico Technology\SDK\lib\usbtc08.dll."
         )
+        if x86_candidate and os.path.isfile(x86_candidate):
+            message += (
+                f" A 32-bit SDK installation was detected at {x86_candidate}; this "
+                "64-bit application cannot load that DLL."
+            )
+        if errors:
+            message += f" Load attempts: {'; '.join(errors)}"
+        raise PicoTC08Error(message)
 
     def _bind(self, name: str, restype, argtypes: list[object]):
         function = getattr(self._dll, name)
