@@ -60,8 +60,11 @@ class PicoTC08Library:
         environment: dict[str, str], discovered: str | None
     ) -> tuple[list[str], str | None]:
         candidates: list[str] = []
+        normalized_environment = {
+            key.casefold(): value for key, value in environment.items()
+        }
 
-        sdk_override = environment.get("PICO_SDK_PATH")
+        sdk_override = normalized_environment.get("pico_sdk_path")
         if sdk_override:
             candidates.extend(
                 [
@@ -70,8 +73,8 @@ class PicoTC08Library:
                 ]
             )
 
-        for variable in ("ProgramW6432", "ProgramFiles"):
-            program_files = environment.get(variable)
+        for variable in ("programw6432", "programfiles"):
+            program_files = normalized_environment.get(variable)
             if program_files:
                 candidates.append(
                     ntpath.join(
@@ -83,7 +86,7 @@ class PicoTC08Library:
                     )
                 )
 
-        program_files_x86 = environment.get("ProgramFiles(x86)")
+        program_files_x86 = normalized_environment.get("programfiles(x86)")
         x86_candidate = (
             ntpath.join(
                 program_files_x86,

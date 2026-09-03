@@ -57,9 +57,9 @@ class FakeTC08Library:
 
 def test_windows_driver_candidates_prefer_64_bit_sdk_and_ignore_x86_discovery() -> None:
     environment = {
-        "ProgramW6432": r"C:\Program Files",
-        "ProgramFiles": r"C:\Program Files",
-        "ProgramFiles(x86)": r"C:\Program Files (x86)",
+        "PROGRAMW6432": r"C:\Program Files",
+        "PROGRAMFILES": r"C:\Program Files",
+        "PROGRAMFILES(X86)": r"C:\Program Files (x86)",
     }
     x86_driver = r"C:\Program Files (x86)\Pico Technology\SDK\lib\usbtc08.dll"
 
