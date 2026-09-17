@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from dmm_app.battery_models import BatteryModelDownloadWorker
 from dmm_app.clock import AcquisitionClock
 from dmm_app.commands import INSTRUMENT_PROFILES, InstrumentProfile, idn_matches_profile
 from dmm_app.logging_util import CsvLogger
@@ -144,6 +145,7 @@ class InstrumentPanel(QGroupBox):
             | WaveformCaptureWorker
             | RepeatedWaveformCaptureWorker
             | PicoTC08Worker
+            | BatteryModelDownloadWorker
             | None
         ) = None
         self._scope_setup_applied: OscilloscopeSetup | None = None
@@ -272,6 +274,23 @@ class InstrumentPanel(QGroupBox):
         measurement_layout.addLayout(controls)
         self._measurement_section = CollapsibleSection("Measurement", measurement_content)
         layout.addWidget(self._measurement_section)
+
+        self._battery_model_controls = QWidget()
+        model_layout = QHBoxLayout(self._battery_model_controls)
+        model_layout.setContentsMargins(0, 0, 0, 0)
+        model_layout.addWidget(QLabel("Battery model"))
+        self._battery_model_slot = QComboBox()
+        for slot in range(1, 10):
+            self._battery_model_slot.addItem(f"User model {slot}", slot)
+        model_layout.addWidget(self._battery_model_slot)
+        self._battery_model_download = QPushButton("Download model…")
+        self._battery_model_download.setToolTip(
+            "Save the selected model's 101-point voltage/resistance curve as CSV on this computer"
+        )
+        self._battery_model_download.clicked.connect(self.download_battery_model)
+        model_layout.addWidget(self._battery_model_download)
+        model_layout.addStretch(1)
+        layout.addWidget(self._battery_model_controls)
 
         scope_content = QGroupBox()
         scope_layout = QGridLayout(scope_content)
@@ -618,6 +637,7 @@ class InstrumentPanel(QGroupBox):
         self._plot_range_combo.setVisible(has_instrument)
         self._scope_section.setVisible(is_scope)
         self._tc08_section.setVisible(is_tc08)
+        self._battery_model_controls.setVisible(profile.instrument == InstrumentType.KEITHLEY_2281S)
         self._status_label.setText("Disconnected" if has_instrument else "Select an instrument profile")
         if has_instrument:
             self._append_output(f"Loaded profile: {profile.instrument.value}.")
@@ -945,6 +965,11 @@ class InstrumentPanel(QGroupBox):
             connected and not running and not tools_busy and (not waveform_mode or waveform_ready)
         )
         self._stop_button.setEnabled(running)
+        self._battery_model_slot.setEnabled(not running)
+        self._battery_model_download.setEnabled(
+            profile.instrument == InstrumentType.KEITHLEY_2281S
+            and connected and not running and not tools_busy
+        )
         self._snapshot_button.setEnabled(
             connected
             and not running
@@ -1614,12 +1639,14 @@ class InstrumentPanel(QGroupBox):
             self._worker.stop()
             self._worker.join(timeout=1.5)
             if isinstance(
-                self._worker, (RepeatedWaveformCaptureWorker, PicoTC08Worker)
+                self._worker, (RepeatedWaveformCaptureWorker, PicoTC08Worker, BatteryModelDownloadWorker)
             ) and self._worker.is_alive():
                 if announce:
                     operation = (
                         "waveform transfer"
                         if isinstance(self._worker, RepeatedWaveformCaptureWorker)
+                        else "battery-model download"
+                        if isinstance(self._worker, BatteryModelDownloadWorker)
                         else "TC-08 conversion"
                     )
                     self._append_output(f"Stop requested; waiting for the current {operation}.")
@@ -1629,6 +1656,40 @@ class InstrumentPanel(QGroupBox):
                 self._append_output("Acquisition stopped.")
         self._worker = None
         self._refresh_controls()
+
+    def download_battery_model(self, _checked: bool = False) -> None:
+        if (
+            self._selected_instrument() != InstrumentType.KEITHLEY_2281S
+            or not self.is_connected or not self._scpi or self.is_running
+        ):
+            return
+        slot = self._battery_model_slot.currentData()
+        path, _ = QFileDialog.getSaveFileName(
+            self, f"Download user model {slot}", f"2281S_model_{slot}.csv",
+            "Battery model CSV (*.csv)",
+        )
+        if not path:
+            return
+        self._worker = BatteryModelDownloadWorker(
+            scpi=self._scpi, slot=slot, path=path,
+            on_result=lambda result: self._event_sink(
+                "battery_model_result", self.instrument_index, result
+            ),
+        )
+        self._append_output(f"Downloading user model {slot}…")
+        self._worker.start()
+        self._refresh_controls()
+
+    def handle_battery_model_result(self, result) -> None:
+        status, message = result
+        # Completion is posted immediately before the worker returns. Waiting
+        # briefly here prevents controls staying disabled after a fast transfer.
+        if isinstance(self._worker, BatteryModelDownloadWorker):
+            self._worker.join(timeout=0.1)
+        self._append_output(message)
+        self._refresh_controls()
+        if status == "error":
+            QMessageBox.critical(self, "Battery-model download failed", message)
 
     def take_snapshot(self, _checked: bool = False) -> None:
         if self._selected_instrument() == InstrumentType.PICOLOG_TC08:
@@ -2268,6 +2329,8 @@ class DMMAppWindow(QMainWindow):
                 panel.handle_worker_error(payload)
             elif kind == "warning":
                 panel.handle_worker_warning(payload)
+            elif kind == "battery_model_result":
+                panel.handle_battery_model_result(payload)
             elif kind == "capture_complete":
                 panel.handle_capture_complete(payload)
             elif kind == "capture_progress" and isinstance(payload, WaveformCaptureProgress):

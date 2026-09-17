@@ -424,3 +424,32 @@ The parser fixture comes from the telephone repository's
 
 Sources: [Keithley 2281S reference manual](https://download.tek.com/manual/077114601_2281_Ref_Mar_2019.pdf),
 sections 2 and 7; [BQ25622 datasheet](https://www.ti.com/lit/ds/symlink/bq25622.pdf).
+
+## Download a Keithley 2281S battery model to your computer
+
+1. Select **Keithley 2281S-20-6 battery simulator**, choose the USB VISA resource,
+   and connect. Stop polling in this panel before downloading a model.
+2. In **Battery model**, select the populated **User model 1–9** slot to download.
+3. Click **Download model…**. Choose the folder and filename in the Mac save dialog.
+4. The panel reports the saved path after the transfer finishes. Repeat for other slots.
+
+The CSV contains 101 rows, for state of charge 0–100%, with
+`soc_percent`, `open_circuit_voltage_V` and `resistance_ohm` columns. Numeric
+precision from the instrument is retained. Downloading uses only model queries;
+it does not recall a model, change the output, or alter simulator settings.
+Polling and snapshots in this panel remain disabled while the transfer runs.
+**Stop** cancels the download after any pending instrument query returns.
+
+Empty slots, malformed/truncated responses and communication failures produce an
+error instead of a partial file. An existing destination is replaced only after
+the complete model has been read and the CSV written successfully.
+
+This exports the user-model curve, not the native `.mdl` file or the simulator's
+capacity/current/output settings. The documented model queries address user
+slots 1–9, not the five factory presets. Native `.mdl` export uses the 2281S's
+front-panel USB flash-drive function. Our download saves directly to the computer
+through its existing VISA connection; no USB flash drive is needed.
+
+Reference: [2281S Reference Manual](https://download.tek.com/manual/077114601_2281_Ref_Mar_2019.pdf),
+sections 3-62, 7-30, 7-33 and 7-37. Live transfer still needs validation with the
+physical 2281S; automated checks use representative instrument responses.

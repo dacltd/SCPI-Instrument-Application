@@ -46,6 +46,9 @@ def main() -> int:
             window.show()
             if smoke_test:
                 panel = window._panels[0]
+                panel._instrument_combo.setCurrentText(InstrumentType.KEITHLEY_2281S.value)
+                battery_download_controls = not panel._battery_model_controls.isHidden()
+                battery_model_slots = panel._battery_model_slot.count()
                 panel._instrument_combo.setCurrentText(InstrumentType.PICOLOG_TC08.value)
                 tc08_settings = panel._tc08_settings_from_controls()
                 tc08_measurements = panel._build_tc08_measurements()
@@ -58,6 +61,8 @@ def main() -> int:
                 with closing(pyvisa.ResourceManager("@py")) as manager:
                     report = {
                         "version": __version__,
+                        "battery_download_controls": battery_download_controls,
+                        "battery_model_slots": battery_model_slots,
                         "tc08_profile": InstrumentType.PICOLOG_TC08 in INSTRUMENT_PROFILES,
                         "tc08_channels": len(tc08_settings.channel_types),
                         "tc08_measurements": len(tc08_measurements),
