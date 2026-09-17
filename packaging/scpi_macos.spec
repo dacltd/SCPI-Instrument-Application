@@ -1,10 +1,12 @@
 # Build with: python -m PyInstaller packaging/scpi_macos.spec
 import os
 import platform
+import runpy
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules, copy_metadata
 
 root = Path(SPECPATH).parent
+version = runpy.run_path(str(root / "dmm_app/__init__.py"))["__version__"]
 candidates = [Path(os.environ["SCPI_LIBUSB_PATH"])] if os.environ.get("SCPI_LIBUSB_PATH") else [
     Path("/opt/homebrew/lib/libusb-1.0.dylib"),
     Path("/usr/local/lib/libusb-1.0.dylib"),
@@ -46,8 +48,8 @@ app = BUNDLE(
     bundle_identifier="uk.co.dacltd.scpilab",
     info_plist={
         "CFBundleDisplayName": "SCPI Lab Instrument",
-        "CFBundleShortVersionString": "0.1.0",
-        "CFBundleVersion": "1",
+        "CFBundleShortVersionString": version,
+        "CFBundleVersion": version,
         "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "13.0",
         "NSLocalNetworkUsageDescription": "Discover and connect to laboratory instruments on your network.",

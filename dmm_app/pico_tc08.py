@@ -5,6 +5,8 @@ from __future__ import annotations
 import ctypes
 import ntpath
 import os
+import platform
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -106,11 +108,46 @@ class PicoTC08Library:
         candidates.append("usbtc08.dll")
         return list(dict.fromkeys(candidates)), x86_candidate
 
+    @staticmethod
+    def _macos_driver_candidates(
+        environment: dict[str, str], discovered: str | None
+    ) -> list[str]:
+        # Finder does not inherit shell library-path settings. Use explicit
+        # locations for PicoSDK, then PicoLog's bundled driver as a fallback.
+        roots = []
+        override = environment.get("PICO_SDK_PATH")
+        if override:
+            roots.append(os.path.expanduser(override))
+        roots.extend([
+            "/Library/Frameworks/PicoSDK.framework",
+            os.path.expanduser("~/Library/Frameworks/PicoSDK.framework"),
+        ])
+        candidates = []
+        for root in roots:
+            for relative in (
+                "Libraries/libusbtc08/libusbtc08.dylib",
+                "Libraries/libusbtc08/libusbtc08.2.dylib",
+                "lib/libusbtc08.dylib",
+                "libusbtc08.dylib",
+            ):
+                candidates.append(os.path.join(root, relative))
+        if discovered:
+            candidates.append(discovered)
+        candidates.extend([
+            "/Applications/PicoLog.app/Contents/Resources/libusbtc08.dylib",
+            os.path.expanduser("~/Applications/PicoLog.app/Contents/Resources/libusbtc08.dylib"),
+            "libusbtc08.dylib",
+        ])
+        return list(dict.fromkeys(candidates))
+
     def _load_driver(self):
         if os.name == "nt":
             candidates, x86_candidate = self._windows_driver_candidates(
                 dict(os.environ), find_library("usbtc08")
             )
+        elif sys.platform == "darwin":
+            candidates = self._macos_driver_candidates(dict(os.environ), find_library("usbtc08"))
+            x86_candidate = None
         else:
             discovered = find_library("usbtc08")
             candidates = [candidate for candidate in (discovered, "usbtc08") if candidate]
@@ -121,6 +158,9 @@ class PicoTC08Library:
             is_absolute_windows_path = os.name == "nt" and ntpath.isabs(candidate)
             if is_absolute_windows_path and not os.path.isfile(candidate):
                 continue
+            if sys.platform == "darwin" and os.name != "nt":
+                if os.path.isabs(candidate) and not os.path.isfile(candidate):
+                    continue
             directory_handle = None
             try:
                 if os.name == "nt":
@@ -136,12 +176,30 @@ class PicoTC08Library:
                 if directory_handle is not None:
                     directory_handle.close()
 
-        message = (
-            "The 64-bit PicoSDK USB TC-08 driver could not be found or loaded. "
-            "Install the 64-bit PicoSDK with USB TC-08 support selected, then restart "
-            "the application. The expected driver location is "
-            r"C:\Program Files\Pico Technology\SDK\lib\usbtc08.dll."
-        )
+        if os.name == "nt":
+            message = (
+                "The 64-bit PicoSDK USB TC-08 driver could not be found or loaded. "
+                "Install the 64-bit PicoSDK with USB TC-08 support selected, then restart "
+                "the application. The expected driver location is "
+                r"C:\Program Files\Pico Technology\SDK\lib\usbtc08.dll."
+            )
+        elif sys.platform == "darwin":
+            architecture = platform.machine()
+            sdk_architecture = "ARM64 (Apple Silicon)" if architecture == "arm64" else "x64 (Intel)"
+            message = (
+                f"The macOS PicoSDK USB TC-08 driver could not be loaded by this {architecture} app. "
+                f"Install PicoSDK for macOS {sdk_architecture} from "
+                "https://www.picotech.com/downloads, then restart the application. "
+                "The expected driver location is "
+                "/Library/Frameworks/PicoSDK.framework/Libraries/libusbtc08/libusbtc08.dylib. "
+                "The app and driver must have matching architectures; an Intel-only "
+                "PicoLog driver cannot load in an ARM64 app."
+            )
+        else:
+            message = (
+                "The PicoSDK USB TC-08 driver could not be found or loaded. "
+                "Install libusbtc08 for this platform and make it available to the dynamic loader."
+            )
         if x86_candidate and os.path.isfile(x86_candidate):
             message += (
                 f" A 32-bit SDK installation was detected at {x86_candidate}; this "

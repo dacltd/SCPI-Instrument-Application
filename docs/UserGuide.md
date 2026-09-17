@@ -129,8 +129,9 @@ The MP730889 is intentionally limited to one row. The SPE6103 can monitor voltag
 
 ## Connect a PicoLog USB TC-08
 
-1. Install the 64-bit PicoSDK on Windows, connect one TC-08 by USB, and close
-   PicoLog or any other program that may already have the logger open.
+1. Install the 64-bit PicoSDK on Windows, or the matching ARM64/x64 PicoSDK
+   on macOS (see [macOS setup](macOS.md#picolog-usb-tc-08)). Connect one TC-08
+   by USB and close PicoLog or any other program that may have the logger open.
 2. Select `PicoLog USB TC-08` in a panel.
 3. Expand `PicoLog TC-08 Setup`. Choose 50 or 60 Hz mains rejection, choose the
    display units, and select the thermocouple type for every connected channel.

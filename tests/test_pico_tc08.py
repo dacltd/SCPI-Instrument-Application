@@ -230,3 +230,60 @@ def test_worker_emits_selected_channels_and_marks_over_range() -> None:
     assert readings[1].value is None
     assert readings[1].raw_response == "OVER-RANGE"
     assert readings[1].source == "Channel 2"
+
+
+def test_macos_driver_candidates_find_sdk_without_shell_library_path() -> None:
+    candidates = PicoTC08Library._macos_driver_candidates({}, None)
+    assert candidates[0] == (
+        "/Library/Frameworks/PicoSDK.framework/Libraries/libusbtc08/libusbtc08.dylib"
+    )
+    assert "/Applications/PicoLog.app/Contents/Resources/libusbtc08.dylib" in candidates
+    assert candidates.index("/Applications/PicoLog.app/Contents/Resources/libusbtc08.dylib") > 0
+
+
+def test_macos_driver_override_precedes_standard_sdk() -> None:
+    candidates = PicoTC08Library._macos_driver_candidates(
+        {"PICO_SDK_PATH": "/custom/PicoSDK.framework"}, "/custom/libusbtc08.dylib"
+    )
+    assert candidates[0] == "/custom/PicoSDK.framework/Libraries/libusbtc08/libusbtc08.dylib"
+    assert "/custom/libusbtc08.dylib" in candidates
+
+
+def test_macos_loader_loads_sdk_and_falls_back_after_incompatible_driver() -> None:
+    library = PicoTC08Library.__new__(PicoTC08Library)
+    library._dll_directory_handles = []
+    loaded = object()
+    with (
+        patch.object(pico_tc08.os, "name", "posix"),
+        patch.object(pico_tc08.sys, "platform", "darwin"),
+        patch.object(pico_tc08, "find_library", return_value=None),
+        patch.object(PicoTC08Library, "_macos_driver_candidates",
+                     return_value=["/old/libusbtc08.dylib", "/new/libusbtc08.dylib"]),
+        patch.object(pico_tc08.os.path, "isfile", return_value=True),
+        patch.object(pico_tc08.ctypes, "CDLL",
+                     side_effect=[OSError("incompatible architecture"), loaded]) as load,
+    ):
+        assert library._load_driver() is loaded
+    assert [call.args[0] for call in load.call_args_list] == [
+        "/old/libusbtc08.dylib", "/new/libusbtc08.dylib"
+    ]
+
+
+@pytest.mark.parametrize("architecture, sdk", [("arm64", "ARM64 (Apple Silicon)"),
+                                                ("x86_64", "x64 (Intel)")])
+def test_macos_loader_reports_matching_sdk_without_windows_instructions(architecture, sdk) -> None:
+    library = PicoTC08Library.__new__(PicoTC08Library)
+    library._dll_directory_handles = []
+    with (
+        patch.object(pico_tc08.os, "name", "posix"),
+        patch.object(pico_tc08.sys, "platform", "darwin"),
+        patch.object(pico_tc08.platform, "machine", return_value=architecture),
+        patch.object(pico_tc08, "find_library", return_value=None),
+        patch.object(pico_tc08.os.path, "isfile", return_value=False),
+        patch.object(pico_tc08.ctypes, "CDLL", side_effect=OSError("incompatible architecture")),
+        pytest.raises(PicoTC08Error) as error,
+    ):
+        library._load_driver()
+    assert sdk in str(error.value)
+    assert "incompatible architecture" in str(error.value)
+    assert "Program Files" not in str(error.value)
