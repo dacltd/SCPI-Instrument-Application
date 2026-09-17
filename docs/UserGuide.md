@@ -289,3 +289,65 @@ Events collected during each UI queue drain are sorted by their elapsed timestam
 - Validate optimiser plans against `:ACQuire:SRATe?`, preamble `x_increment`, and measured trigger-to-trigger timing on the physical DHO804 over both USB and LAN.
 - Run DHO804 Tools with a varying input signal and validate that replay-frame selection produces distinct full RAW WORD payloads, usable hardware timestamps, and sensible inter-frame spacing before enabling production hardware burst/segmented capture.
 - If software timing is insufficient, define the required accuracy and shared trigger wiring before adding cross-device external-trigger synchronization.
+
+## GSMIV power bench capture over USB
+
+### Connections and capture
+
+1. On the Keithley 2281S-20-6, select battery-simulator mode and configure the
+   intended output, model and limits. Connect its USB device interface to the PC.
+2. In one instrument panel select **Keithley 2281S-20-6 battery simulator**,
+   select its `USB…::INSTR` VISA resource, and connect. This profile queries
+   simulator terminal voltage and current. It does not change the operating
+   mode, output enable, limits, state of charge or model. Normal PSU mode needs
+   a different profile; these queries are for battery-simulator mode.
+3. Load the telephone's `m5stack-fire-power-validation` firmware and connect
+   its debug USB serial interface. In another panel select **GSMIV power
+   telemetry**, the corresponding serial port, **115200 baud** and **LF**.
+   Close other programs using that serial port. Opening USB serial can reset
+   the telephone depending on its adapter; log a fresh boot for firmware metadata.
+4. Both profiles default to battery voltage and battery current. The GSMIV
+   profile also offers upstream VEXT, downstream VBUS and SYS voltage. Select
+   up to two plotted channels; complete frames are retained regardless of selection.
+5. Choose **Use shared CSV**, choose a new capture file, enable **Log this
+   instrument** on both panels, then **Start all connected**. A 250 ms Keithley
+   interval is a useful initial setting, subject to actual response time.
+6. Save the application configuration beside the CSV. Add run notes recording
+   board serial and revision, firmware commit/build, simulator settings,
+   temperature, reference-instrument IDs/calibration and the load/sweep steps.
+
+The existing DMM/scope profiles can use the other two instrument panels.
+USB/VISA requires a working VISA backend/USB driver on the PC. If the instrument
+is missing, establish VISA discovery first; use the instrument's USB device
+port, not its USB memory-stick host port.
+
+### Interpreting the data
+
+- Both numeric current channels use **positive = charging**. The Keithley
+  simulator's native sign is reversed, as its negative readings mean charging;
+  original responses remain unchanged in `raw_response`.
+- Raw firmware frames, diagnostics and boot metadata are logged as **Serial
+  data** rows; selected voltage/current channels have their own rows and units
+  of volts/amperes. All channels from one frame share its receipt timestamp.
+- Partial serial reads are reassembled. Malformed frames are retained with an
+  invalid annotation and produce no numeric readings. Failed reads, aborted
+  current conversions, invalid encodings, disabled/unreadable ADC settings and
+  clipped VEXT produce blank numeric values, not false zero readings.
+- `segment=N` on raw rows identifies a sequence reset or device tick wrap.
+- Shared elapsed time is based on the host's monotonic clock. SCPI responses
+  and UART frames are timestamped on receipt, not at the actual hardware ADC
+  conversion. Queries are sequential, and serial/USB buffering adds latency.
+  Compare steady-state plateaus; use the oscilloscope for transient timing.
+- The firmware's VEXT capture is a live nine-sample burst, without pausing
+  charging. It retains sub-4.5 V readings but is not a settled quiescent reading.
+- Firmware IBAT zero during forward-mode supplementation is inconclusive. Do
+  not treat it as proof of zero discharge or integrate it into net battery charge.
+- The normal validation firmware stays awake. Use its `-sleep` environment for
+  normal sleep behaviour; gaps during sleep are expected. The new cutoff and
+  voltage ceiling are not implemented by enabling this diagnostic build.
+
+The parser fixture comes from the telephone repository's
+`test/power_bench_capture/power_bench_capture_host_test.cpp` (schema 1).
+
+Sources: [Keithley 2281S reference manual](https://download.tek.com/manual/077114601_2281_Ref_Mar_2019.pdf),
+sections 2 and 7; [BQ25622 datasheet](https://www.ti.com/lit/ds/symlink/bq25622.pdf).

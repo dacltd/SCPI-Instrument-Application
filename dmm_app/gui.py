@@ -37,7 +37,8 @@ from dmm_app.models import (
     SerialSettings,
     VisaSettings,
 )
-from dmm_app.poller import PollRequest, PollingWorker, RawSerialWorker, parse_primary_value
+from dmm_app.gsmiv_power import GsmivPowerWorker
+from dmm_app.poller import PollRequest, PollingWorker, RawSerialWorker, scaled_primary_value
 from dmm_app.plotting import InstrumentPlotWidget
 from dmm_app.oscilloscope import (
     DHO804_MEMORY_POINTS,
@@ -536,6 +537,8 @@ class InstrumentPanel(QGroupBox):
         self._clear_measurement_rows()
         if profile.commands:
             self._add_measurement_row(next(iter(profile.commands)), self._first_source(profile))
+        if profile.instrument in (InstrumentType.GSMIV_POWER, InstrumentType.KEITHLEY_2281S):
+            self._add_measurement_row(MeasurementFunction.BATTERY_CURRENT, "")
         is_serial = profile.connection_kind == ConnectionKind.SERIAL
         self._endpoint_label.setText("Serial port" if is_serial else "VISA resource")
         self._endpoint_label.setVisible(has_instrument)
@@ -864,14 +867,15 @@ class InstrumentPanel(QGroupBox):
         self._add_button.setEnabled(
             not running
             and not tools_busy
-            and not profile.is_raw_serial
+            and (not profile.is_raw_serial or profile.instrument == InstrumentType.GSMIV_POWER)
             and not waveform_mode
             and len(self._measurement_rows) < profile.maximum_rows
             and self._next_available_measurement() is not None
         )
         for row in self._measurement_rows:
             row.function_combo.setEnabled(
-                not running and not tools_busy and not profile.is_raw_serial and not waveform_mode
+                not running and not tools_busy and
+                (not profile.is_raw_serial or profile.instrument == InstrumentType.GSMIV_POWER) and not waveform_mode
             )
             row.source_combo.setEnabled(
                 not running and not tools_busy and bool(profile.sources) and not waveform_mode
@@ -1278,6 +1282,7 @@ class InstrumentPanel(QGroupBox):
                     query_command=command.query_for_source(source),
                     unit=command.unit,
                     source=source,
+                    value_scale=command.value_scale,
                 )
             )
             setup_commands.extend(command.prepare_commands)
@@ -1325,7 +1330,20 @@ class InstrumentPanel(QGroupBox):
         profile = self._selected_profile()
         endpoint = self._endpoint_combo.currentText().strip()
         repeated_output_directory: str | None = None
-        if profile.is_raw_serial:
+        if profile.instrument == InstrumentType.GSMIV_POWER:
+            requests, _ = self._build_poll_requests()
+            self._worker = GsmivPowerWorker(
+                transport=self._transport,
+                clock=self._clock,
+                instrument_index=self.instrument_index,
+                connection=endpoint,
+                terminator=LINE_ENDINGS[self._ending_combo.currentText()],
+                on_reading=lambda reading: self._event_sink("reading", self.instrument_index, reading),
+                on_error=lambda error: self._event_sink("error", self.instrument_index, error),
+                start_gate=start_gate,
+                measurements=requests,
+            )
+        elif profile.is_raw_serial:
             self._worker = RawSerialWorker(
                 transport=self._transport,
                 clock=self._clock,
@@ -1469,7 +1487,7 @@ class InstrumentPanel(QGroupBox):
                         function=request.function,
                         source=request.source,
                         raw_response=raw,
-                        value=parse_primary_value(raw),
+                        value=scaled_primary_value(raw, request.value_scale),
                         unit=request.unit,
                     ),
                 )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -13,12 +15,17 @@ from dmm_app.transport import Transport
 
 def parse_primary_value(raw_response: str) -> float | None:
     token = raw_response.replace(",", " ").split()[0].strip() if raw_response.strip() else ""
-    if not token:
+    # Keithley may append the unit directly (e.g. -2.5E-02A).
+    match = re.fullmatch(r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?)(?:V|A|Hz)?", token)
+    if not match:
         return None
-    try:
-        return float(token)
-    except ValueError:
-        return None
+    value = float(match.group(1))
+    return value if math.isfinite(value) and abs(value) < 1e30 else None
+
+
+def scaled_primary_value(raw_response: str, scale: float = 1.0) -> float | None:
+    value = parse_primary_value(raw_response)
+    return None if value is None else value * scale
 
 
 @dataclass(frozen=True)
@@ -28,6 +35,7 @@ class PollRequest:
     query_command: str
     unit: str
     source: str = ""
+    value_scale: float = 1.0
 
 
 class PollingWorker(threading.Thread):
@@ -85,7 +93,7 @@ class PollingWorker(threading.Thread):
                         function=measurement.function,
                         source=measurement.source,
                         raw_response=raw,
-                        value=parse_primary_value(raw),
+                        value=scaled_primary_value(raw, measurement.value_scale),
                         unit=measurement.unit,
                     )
                     self._on_reading(reading)

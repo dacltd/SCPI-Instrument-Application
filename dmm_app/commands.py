@@ -16,6 +16,7 @@ class MeasurementCommand:
     prepare_commands: tuple[str, ...]
     query_command: str
     unit: str
+    value_scale: float = 1.0
 
     def query_for_source(self, source: str = "") -> str:
         return self.query_command.format(source=source)
@@ -42,6 +43,47 @@ class InstrumentProfile:
 
 
 INSTRUMENT_PROFILES: dict[InstrumentType, InstrumentProfile] = {
+    InstrumentType.KEITHLEY_2281S: InstrumentProfile(
+        instrument=InstrumentType.KEITHLEY_2281S,
+        protocol=ProtocolType.SCPI,
+        connection_kind=ConnectionKind.VISA,
+        idn_query="*IDN?",
+        idn_expected_tokens=("2281S-20-6",),
+        maximum_rows=2,
+        commands={
+            MeasurementFunction.BATTERY_VOLTAGE: MeasurementCommand(
+                function=MeasurementFunction.BATTERY_VOLTAGE,
+                prepare_commands=(),
+                query_command=":BATTery:SIMulator:TVOLtage?",
+                unit="V",
+            ),
+            MeasurementFunction.BATTERY_CURRENT: MeasurementCommand(
+                function=MeasurementFunction.BATTERY_CURRENT,
+                prepare_commands=(),
+                query_command=":BATTery:SIMulator:CURRent?",
+                unit="A",
+                value_scale=-1.0,  # Keithley simulator: negative means charging.
+            ),
+        },
+    ),
+    InstrumentType.GSMIV_POWER: InstrumentProfile(
+        instrument=InstrumentType.GSMIV_POWER,
+        protocol=ProtocolType.RAW_SERIAL,
+        connection_kind=ConnectionKind.SERIAL,
+        idn_query="",
+        idn_expected_tokens=(),
+        maximum_rows=2,
+        commands={
+            function: MeasurementCommand(function, (), field, unit)
+            for function, field, unit in (
+                (MeasurementFunction.BATTERY_VOLTAGE, "vbat_mv", "V"),
+                (MeasurementFunction.BATTERY_CURRENT, "ibat_ma", "A"),
+                (MeasurementFunction.EXTERNAL_VOLTAGE, "vext_mv", "V"),
+                (MeasurementFunction.CHARGER_INPUT_VOLTAGE, "vbus_mv", "V"),
+                (MeasurementFunction.SYSTEM_VOLTAGE, "vsys_mv", "V"),
+            )
+        },
+    ),
     InstrumentType.NONE: InstrumentProfile(
         instrument=InstrumentType.NONE,
         protocol=ProtocolType.SCPI,

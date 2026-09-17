@@ -11,6 +11,8 @@ class InstrumentType(str, Enum):
     OWON_SPE6103 = "OWON SPE6103 PSU"
     RIGOL_DHO804 = "RIGOL DHO804 oscilloscope"
     RAW_SERIAL = "Raw serial monitor"
+    KEITHLEY_2281S = "Keithley 2281S-20-6 battery simulator"
+    GSMIV_POWER = "GSMIV power telemetry"
 
 
 class ConnectionKind(str, Enum):
@@ -33,6 +35,11 @@ class MeasurementFunction(str, Enum):
     VOLTAGE_MINIMUM = "Voltage minimum"
     FREQUENCY = "Frequency"
     RAW_DATA = "Serial data"
+    BATTERY_VOLTAGE = "Battery voltage"
+    BATTERY_CURRENT = "Battery current (+ charging)"
+    EXTERNAL_VOLTAGE = "External input voltage"
+    CHARGER_INPUT_VOLTAGE = "Charger input voltage"
+    SYSTEM_VOLTAGE = "System voltage"
     WAVEFORM_CAPTURE = "Waveform capture"
 
 
