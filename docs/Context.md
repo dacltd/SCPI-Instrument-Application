@@ -88,7 +88,7 @@ Monitor up to sixteen independently connected serial, VISA, or PicoSDK instrumen
 - Run the DHO804 Tools capability test against physical firmware and validate replay-frame RAW selection, frame timestamp format, maximum frame count, and actual inter-frame spacing.
 - Define shared external-trigger synchronization only if software-correlated timestamps prove insufficient.
 - Add Keithley Battery Simulator support as a new instrument profile with connect/control/read capability.
-- Add OWON SPE stepped output sequencing: allow configuring voltage/current mode steps with per-step time and target voltage/current entries.
+- Bench-validate the version 0.4.0 Automation OWON/2281S timed sequencer and its GSMIV capture examples.
 - Validate MP730889 `*IDN?` response and baseline SCPI commands on real hardware.
 - Confirm required serial framing details and update defaults if needed.
 - Add GUI controls for advanced serial options (parity, data bits, stop bits, timeout).
@@ -112,3 +112,13 @@ Monitor up to sixteen independently connected serial, VISA, or PicoSDK instrumen
 ## Version 0.3.0 workspace
 
 Overview plus per-instrument Live data and Setup & tools pages replace the fixed grid. Instrument slots stay stable for logging; empty slots are hidden and additional devices are created on demand (maximum 16). Schema-2 configurations retain Overview trace choices and load schema-1 files. Keithley monitoring adds VOC, SOC, remaining Ah and internal resistance. Existing acquisition workers feed both views without extra queries.
+
+## Version 0.4.0 automation
+
+Top-level Automation tab with Sequence, Setup and Run pages; validated JSON files,
+role assignments, bounded settings, checked SCPI transactions on existing sessions,
+relative settling/capture dwells, pause/abort and explicit completion/abort actions.
+Events share the acquisition clock and CSV, with a separate JSONL event journal.
+Run directories preserve scripts, workspace, assignments and operator notes.
+Examples use operator-confirmed 10 V; current limits and dwell times need review.
+Graphical/conditional execution and hardware validation remain future work.

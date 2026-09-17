@@ -71,7 +71,7 @@ Click **+ Add instrument** and choose a profile. Multiple devices of the same ty
 
 Overview displays current readings, acquisition/logging state, the age of the last received reading, and two selectable scalar graph traces per instrument. Use Left/Right selectors to choose those traces; changing the selection starts a fresh plot for that card. A common time-window selector applies across the cards. The clocks are shared host receipt times, not hardware synchronization. Scope waveforms remain in the scope tab to avoid loading large capture files twice.
 
-Changing tabs does not stop polling or logging and does not create another instrument connection. **Stop all acquisition** stops acquisition/downloads; it does not turn instrument outputs off. Historical readings remain visible with their age when disconnected.
+Changing tabs does not stop polling or logging and does not create another instrument connection. **Stop all acquisition** normally stops acquisition/downloads without changing outputs. During automation it first aborts the sequence, applies its abort actions, then stops acquisition. Historical readings remain visible with their age when disconnected.
 
 Use the `−` button beside `Profile & Connection` or `Measurement` to collapse that section independently. The output history expands into the released space. Use the resulting `+` button to restore the section; collapsing controls does not disconnect a device or stop acquisition.
 
@@ -474,3 +474,11 @@ minimum cycle time, not a simultaneous sample guarantee. Current is positive
 when charging, capacity is in Ah, state of charge is percent, and resistance is
 in ohms. These additions use simulator queries only. Physical validation of
 these extra readbacks is still pending.
+
+
+## Automation version 0.4.0
+
+Use the consolidated **Automation** tab for timed OWON SPE6103 and Keithley
+2281S steps, editable dwell periods, instrument assignments and end/abort actions.
+It includes loadable USB-check and battery-policy plateau examples. See
+[the automation guide](Automation.md) for setup, script format and bench limits.

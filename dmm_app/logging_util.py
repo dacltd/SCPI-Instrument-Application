@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 
 from dmm_app.models import Reading
@@ -55,6 +56,16 @@ class CsvLogger:
                 reading.raw_response,
             ]
         )
+        self._file.flush()
+
+    def write_event(self, record) -> None:
+        """Automation markers share the measurement schema and acquisition clock."""
+        self._writer.writerow([
+            record['timestamp'], f"{record['elapsed_seconds']:.9f}",
+            record['acquisition_run'], '', '', 'Automation', '', '',
+            record['event'], record.get('instrument', ''), '', '',
+            json.dumps(record, allow_nan=False),
+        ])
         self._file.flush()
 
     def close(self) -> None:

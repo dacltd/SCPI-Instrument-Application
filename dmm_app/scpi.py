@@ -14,7 +14,11 @@ class SCPIClient:
         self._transport = transport
         self._terminator = terminator
         self._encoding = encoding
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+
+    def transaction(self):
+        """Serialize a command/read-back group with measurement queries."""
+        return self._lock
 
     def write(self, command: str) -> None:
         payload = f"{command}{self._terminator}".encode(self._encoding)

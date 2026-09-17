@@ -1,0 +1,166 @@
+{
+  "version": 1,
+  "name": "GSMIV \u2014 USB capture and source transition check (10 V)",
+  "notes": "Connect OWON only to the upstream external input and 2281S only to BAT; disconnect the real battery. Use m5stack-fire-power-validation (awake), USB telemetry at 115200, and start with both outputs off. 10 V is the operator-confirmed external voltage. Source 0.5 A, battery discharge 2 A and protection 2.5 A are editable starting assumptions, not confirmed bench limits. Review wiring and these values before running. Select a suitable 2281S battery model in simulator mode with range covering 3.10\u20133.95 V; retain its model resistance and record it. This sequence selects STATIC simulation. VOC is not loaded terminal VBAT. 15 s settle/60 s capture are provisional; inspect drift and extend as needed. Logging continues during all phases. End/abort attempts source OFF and leaves the battery in its current state; it does not guarantee power if communication or instrument protection fails. Pause holds settings and continues logging. DMM/shunt references and oscilloscope remain required for formal qualification. First-run connection and polarity check; this is not release qualification.",
+  "required_observers": [
+    "gsmiv_power"
+  ],
+  "instruments": {
+    "source": {
+      "model": "owon_spe6103",
+      "limits": {
+        "voltage": [
+          0,
+          10
+        ],
+        "current_limit": [
+          0.01,
+          0.5
+        ]
+      }
+    },
+    "battery": {
+      "model": "keithley_2281s",
+      "limits": {
+        "voc": [
+          3.1,
+          3.95
+        ],
+        "current_limit": [
+          0.1,
+          2
+        ],
+        "current_protection": [
+          0.1,
+          2.5
+        ],
+        "voltage_protection": [
+          4.2,
+          4.3
+        ]
+      }
+    }
+  },
+  "steps": [
+    {
+      "label": "Set external supply to confirmed 10 V",
+      "instrument": "source",
+      "action": "voltage",
+      "value": 10,
+      "settle_s": 0,
+      "capture_s": 0
+    },
+    {
+      "label": "External current limit \u2014 review 0.5 A starting value",
+      "instrument": "source",
+      "action": "current_limit",
+      "value": 0.5,
+      "settle_s": 0,
+      "capture_s": 0
+    },
+    {
+      "label": "Use static battery model for repeatable plateaus",
+      "instrument": "battery",
+      "action": "method",
+      "value": "static",
+      "settle_s": 0,
+      "capture_s": 0
+    },
+    {
+      "label": "Battery discharge limit \u2014 review 2 A starting value",
+      "instrument": "battery",
+      "action": "current_limit",
+      "value": 2,
+      "settle_s": 0,
+      "capture_s": 0
+    },
+    {
+      "label": "Battery current protection \u2014 review 2.5 A",
+      "instrument": "battery",
+      "action": "current_protection",
+      "value": 2.5,
+      "settle_s": 0,
+      "capture_s": 0
+    },
+    {
+      "label": "Battery voltage protection for deployed 4.20 V charger",
+      "instrument": "battery",
+      "action": "voltage_protection",
+      "value": 4.25,
+      "settle_s": 0,
+      "capture_s": 0
+    },
+    {
+      "label": "Initial battery operating point",
+      "instrument": "battery",
+      "action": "voc",
+      "value": 3.8,
+      "settle_s": 0,
+      "capture_s": 0
+    },
+    {
+      "label": "Power DUT from simulated battery; allow boot",
+      "instrument": "battery",
+      "action": "output",
+      "value": true,
+      "settle_s": 30,
+      "capture_s": 60
+    },
+    {
+      "label": "Apply external power at 10 V",
+      "instrument": "source",
+      "action": "output",
+      "value": true,
+      "settle_s": 15,
+      "capture_s": 60
+    },
+    {
+      "label": "Weak-source capture; current is not commanded battery current",
+      "instrument": "source",
+      "action": "current_limit",
+      "value": 0.05,
+      "settle_s": 15,
+      "capture_s": 60
+    },
+    {
+      "label": "Restore source limit",
+      "instrument": "source",
+      "action": "current_limit",
+      "value": 0.5,
+      "settle_s": 15,
+      "capture_s": 60
+    },
+    {
+      "label": "Remove external source; retain simulated battery",
+      "instrument": "source",
+      "action": "output",
+      "value": false,
+      "settle_s": 15,
+      "capture_s": 60
+    }
+  ],
+  "on_complete": [
+    {
+      "instrument": "source",
+      "action": "output",
+      "value": false
+    },
+    {
+      "instrument": "battery",
+      "action": "hold",
+      "value": null
+    }
+  ],
+  "on_abort": [
+    {
+      "instrument": "source",
+      "action": "output",
+      "value": false
+    },
+    {
+      "instrument": "battery",
+      "action": "hold",
+      "value": null
+    }
+  ]
+}

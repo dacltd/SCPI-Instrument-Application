@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from dmm_app.automation_ui import AutomationTab
 from dmm_app.battery_models import BatteryModelDownloadWorker
 from dmm_app.overview import OverviewCard
 from dmm_app.clock import AcquisitionClock
@@ -159,6 +160,7 @@ class InstrumentPanel(QGroupBox):
         self._plot_controls_waveform = False
         self._sections_before_graph: tuple[bool, bool, bool, bool] | None = None
         self._stream_requested = False
+        self._automation_locked = False
         self._scope_tools_dialog: DHO804ToolsDialog | None = None
 
         self._build_ui()
@@ -1063,6 +1065,12 @@ class InstrumentPanel(QGroupBox):
             stale_after_seconds=self._live_data_timeout_seconds(profile),
         )
 
+        if self._automation_locked:
+            for widget in (self._connect_button, self._idn_button, self._start_button,
+                           self._stop_button, self._snapshot_button, self._logging_checkbox,
+                           self._battery_model_download):
+                widget.setEnabled(False)
+
     def _live_data_timeout_seconds(self, profile: InstrumentProfile) -> float:
         if profile.is_raw_serial:
             return 3.0
@@ -1877,6 +1885,7 @@ class DMMAppWindow(QMainWindow):
         self._panel_loggers: dict[int, CsvLogger] = {}
         self._panel_log_paths: dict[int, str] = {}
         self._panels: list[InstrumentPanel] = []
+        self._stop_after_automation = False
         self._serial_endpoints: list[str] = []
         self._visa_endpoints: list[str] = []
         self._build_ui()
@@ -1903,7 +1912,7 @@ class DMMAppWindow(QMainWindow):
         start_all.clicked.connect(self._start_all)
         toolbar.addWidget(start_all)
         stop_all = QPushButton("Stop all acquisition")
-        stop_all.setToolTip("Stops acquisition and downloads; does not turn instrument outputs off")
+        stop_all.setToolTip("During automation: abort and apply end actions before stopping acquisition. Otherwise: stop acquisition only.")
         stop_all.clicked.connect(self._stop_all)
         toolbar.addWidget(stop_all)
         self._save_config_button = QPushButton("Save config…")
@@ -1957,6 +1966,11 @@ class DMMAppWindow(QMainWindow):
         for side in (self._tabs.tabBar().ButtonPosition.LeftSide,
                      self._tabs.tabBar().ButtonPosition.RightSide):
             self._tabs.tabBar().setTabButton(0, side, None)
+        self._automation = AutomationTab(self)
+        automation_index = self._tabs.addTab(self._automation, "Automation")
+        for side in (self._tabs.tabBar().ButtonPosition.LeftSide,
+                     self._tabs.tabBar().ButtonPosition.RightSide):
+            self._tabs.tabBar().setTabButton(automation_index, side, None)
         self._add_instrument_button = QPushButton("+ Add instrument")
         self._add_instrument_button.setMinimumHeight(28)
         self._add_instrument_button.setMinimumWidth(150)
@@ -2477,6 +2491,8 @@ class DMMAppWindow(QMainWindow):
         )
 
     def _start_all(self) -> None:
+        if self._automation.active:
+            return
         candidates = [
             panel
             for panel in self._panels
@@ -2495,6 +2511,10 @@ class DMMAppWindow(QMainWindow):
             start_gate.set()
 
     def _stop_all(self) -> None:
+        if self._automation.active:
+            self._stop_after_automation = True
+            self._automation.abort("Stop all requested; aborting sequence before stopping acquisition")
+            return
         for panel in self._panels:
             panel.stop_acquisition()
 
@@ -2509,21 +2529,40 @@ class DMMAppWindow(QMainWindow):
         pending.sort(
             key=lambda event: event[2].elapsed_seconds
             if event[0] == "reading" and isinstance(event[2], Reading)
+            else event[2]["elapsed_seconds"] if event[0] == "automation"
             else float("inf")
         )
         for kind, instrument_index, payload in pending:
+            if kind == "automation":
+                self._automation.handle_event(payload)
+                if self._shared_logger and payload["event"] != "progress":
+                    try:
+                        self._shared_logger.write_event(payload)
+                    except OSError as exc:
+                        self._automation.abort(f"CSV logging failed: {exc}")
+                continue
             if not 0 <= instrument_index < len(self._panels):
                 continue
             panel = self._panels[instrument_index]
             if kind == "reading" and isinstance(payload, Reading):
+                if (self._automation.active and payload.value is None
+                    and panel._selected_instrument() != InstrumentType.GSMIV_POWER):
+                    self._automation.abort(f"Invalid measurement on instrument {instrument_index + 1}")
                 panel.consume_reading(payload)
                 card = self._overview_cards.get(instrument_index)
                 if card is not None:
                     card.consume(payload)
                 logger = self._logger_for_instrument(instrument_index)
                 if logger is not None:
-                    logger.write_reading(payload)
+                    try:
+                        logger.write_reading(payload)
+                    except OSError as exc:
+                        if self._automation.active:
+                            self._automation.abort(f"CSV logging failed: {exc}")
+                        else:
+                            panel.handle_worker_error(f"CSV logging failed: {exc}")
             elif kind == "error":
+                self._automation.abort(f"Instrument {instrument_index + 1}: {payload}")
                 panel.handle_worker_error(payload)
             elif kind == "warning":
                 panel.handle_worker_warning(payload)
@@ -2536,7 +2575,8 @@ class DMMAppWindow(QMainWindow):
         _, elapsed, acquisition_run = self._clock.capture()
         run_label = f"Run {acquisition_run}" if acquisition_run else "Session"
         self._elapsed_label.setText(f"{run_label} +{elapsed:.3f} s")
-        waveform_logging = any(panel.is_waveform_logging for panel in self._panels)
+        self._automation.tick()
+        waveform_logging = self._automation.active or any(panel.is_waveform_logging for panel in self._panels)
         self._log_checkbox.setEnabled(not waveform_logging)
         self._choose_log_button.setEnabled(not waveform_logging)
 
@@ -2726,6 +2766,11 @@ class DMMAppWindow(QMainWindow):
             self._update_panel_logging_tooltip(instrument_index)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self._automation.active:
+            self._automation.abort("Application close requested")
+            self._tabs.setCurrentWidget(self._automation)
+            event.ignore()
+            return
         for panel in self._panels:
             panel._shutdown_scope_tools()
             panel.disconnect_device(announce=False)

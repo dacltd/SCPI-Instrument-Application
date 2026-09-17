@@ -21,11 +21,11 @@ def window():
 
 
 def test_add_and_remove_duplicate_instruments_without_moving_sessions(window):
-    assert window._tabs.count() == 1
+    assert window._tabs.count() == 2
     first = window.add_instrument(InstrumentType.KEITHLEY_2281S)
     second = window.add_instrument(InstrumentType.KEITHLEY_2281S)
     assert first is not second
-    assert window._tabs.count() == 3
+    assert window._tabs.count() == 4
     assert first._detail_tabs.tabText(0) == "Live data"
     second._transport = Mock(is_open=True)
     worker = Mock(is_alive=Mock(return_value=True))
@@ -35,7 +35,7 @@ def test_add_and_remove_duplicate_instruments_without_moving_sessions(window):
     worker.stop.assert_not_called()
     second._transport.close.assert_not_called()
     window._remove_instrument_tab(window._tabs.indexOf(first))
-    assert window._tabs.count() == 2
+    assert window._tabs.count() == 3
     assert second.instrument_index == 1
     assert second._worker is worker
     second._worker = None
@@ -59,7 +59,7 @@ def test_dynamic_workspace_and_legacy_configuration_round_trip(window):
     assert len(document['panels']) == 6
     window._apply_configuration_document(document)
     assert len(window._panels) == 6
-    assert window._tabs.count() == 7
+    assert window._tabs.count() == 8
     legacy = copy.deepcopy(document)
     legacy['version'] = 1
     legacy['panels'] = legacy['panels'][:4]
@@ -68,7 +68,7 @@ def test_dynamic_workspace_and_legacy_configuration_round_trip(window):
         panel.pop('overview', None)
     window._apply_configuration_document(legacy)
     assert len(window._panels) == 4
-    assert window._tabs.count() == 5
+    assert window._tabs.count() == 6
     assert len(window._panels[0]._measurement_rows) == 2
     assert not any(p.is_connected or p.is_running for p in window._panels)
 

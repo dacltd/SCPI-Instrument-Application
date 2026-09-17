@@ -24,7 +24,7 @@ application_analysis = Analysis(
     [str(project_root / "scripts" / "windows_entry.py")],
     pathex=[str(project_root)],
     binaries=package_binaries,
-    datas=package_data,
+    datas=package_data + [(str(project_root / "docs" / "sequences"), "docs/sequences")],
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},

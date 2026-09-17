@@ -10,6 +10,10 @@ latest readings and selectable graphs; each instrument tab contains Live data
 and Setup & tools. Connections and logging keep running when you switch tabs.
 Existing four-panel configuration files are supported.
 
+The **Automation** tab loads and edits timed OWON/2281S test sequences, checks
+settings and logs phase markers alongside measurements. Two battery-policy
+examples are included. See [timed bench automation](docs/Automation.md).
+
 For the standalone Mac app, see [macOS installation and rebuilding](docs/macOS.md).
 
 ## Download the Windows application

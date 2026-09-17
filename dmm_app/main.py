@@ -27,6 +27,8 @@ def smoke_test_application() -> int:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance() or QApplication([])
     window = DMMAppWindow(discover_endpoints=False)
+    window._automation.load_example()
+    assert window._automation.edited_document()["steps"]
     window.close()
     app.processEvents()
     return 0

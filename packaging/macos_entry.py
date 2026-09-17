@@ -42,9 +42,11 @@ def main() -> int:
             app.setApplicationVersion(__version__)
             app.setApplicationName("SCPI Lab Instrument")
             app.setOrganizationName("DAC")
-            window = DMMAppWindow()
+            window = DMMAppWindow(discover_endpoints=not smoke_test)
             window.show()
             if smoke_test:
+                window._automation.load_example()
+                automation_example_steps = len(window._automation.edited_document()["steps"])
                 panel = window.add_instrument(InstrumentType.KEITHLEY_2281S)
                 panel._instrument_combo.setCurrentText(InstrumentType.KEITHLEY_2281S.value)
                 battery_download_controls = not panel._battery_model_controls.isHidden()
@@ -61,6 +63,8 @@ def main() -> int:
                 with closing(pyvisa.ResourceManager("@py")) as manager:
                     report = {
                         "version": __version__,
+                        "automation_tab": window._tabs.tabText(1),
+                        "automation_example_steps": automation_example_steps,
                         "overview_tab": window._tabs.tabText(0),
                         "instrument_pages": panel._detail_tabs.count(),
                         "workspace_tabs": window._tabs.count(),
