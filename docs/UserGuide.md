@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Monitor up to four SCPI, PicoSDK, or raw serial devices in one desktop window and correlate their data in a shared timestamped CSV log.
+Monitor up to sixteen SCPI, PicoSDK, or raw serial devices in one desktop window and correlate their data in a shared timestamped CSV log.
 
 ## Supported profiles
 
@@ -65,9 +65,13 @@ python -m dmm_app.main
 
 ## Workspace
 
-The main window contains four independent instrument panels. Each panel has its own profile, connection, measurement rows, acquisition-output mode where applicable, interval, start/stop controls, logging opt-in, latest values, and output history. The top toolbar controls shared discovery, coordinated start/stop, and whether opted-in instruments use one shared CSV.
+The main window opens on **Overview**, with a dedicated top-level tab for each added instrument. Each panel has its own profile, connection, measurement rows, acquisition-output mode where applicable, interval, start/stop controls, logging opt-in, latest values, and output history. The top toolbar controls shared discovery, coordinated start/stop, and whether opted-in instruments use one shared CSV.
 
-All four panels initially show `No Instrument Selected` and default to the `None` profile. Choose a profile to enable that panel's connection and measurement controls. The panel title then changes to the selected instrument name and returns to `No Instrument Selected` if `None` is selected again.
+Click **+ Add instrument** and choose a profile. Multiple devices of the same type get separate numbered tabs; up to sixteen instruments can be configured. Each instrument has **Live data** and **Setup & tools** pages. Acquisition controls remain visible on both pages. Connection settings, oscilloscope and thermocouple setup, and battery-model downloads are on Setup & tools. Stop and disconnect an instrument before closing its tab.
+
+Overview displays current readings, acquisition/logging state, the age of the last received reading, and two selectable scalar graph traces per instrument. Use Left/Right selectors to choose those traces; changing the selection starts a fresh plot for that card. A common time-window selector applies across the cards. The clocks are shared host receipt times, not hardware synchronization. Scope waveforms remain in the scope tab to avoid loading large capture files twice.
+
+Changing tabs does not stop polling or logging and does not create another instrument connection. **Stop all acquisition** stops acquisition/downloads; it does not turn instrument outputs off. Historical readings remain visible with their age when disconnected.
 
 Use the `−` button beside `Profile & Connection` or `Measurement` to collapse that section independently. The output history expands into the released space. Use the resulting `+` button to restore the section; collapsing controls does not disconnect a device or stop acquisition.
 
@@ -104,7 +108,7 @@ If `Use shared CSV` is turned off while panels are selected, the app warns that 
 
 ### Save and load panel configurations
 
-Click `Save config…` to store the complete four-panel workspace in a readable, versioned JSON file. The file includes:
+Click `Save config…` to store the complete tabbed workspace in a readable, versioned JSON file. The file includes:
 
 - Instrument profiles, manually entered or discovered endpoint text, baud rates and line endings.
 - Measurement rows and sources, acquisition output modes and intervals.
@@ -211,7 +215,7 @@ Click `Apply setup` to send the complete setup and prepare RAW WORD transfer. If
 
 ### DHO804 Tools and burst capability test
 
-Click `Tools…` beside `Optimise logging coverage` to open the modeless DHO804 Tools window. The main four-panel workspace remains visible. The tools window reuses that panel's existing SCPI/VISA connection; it never opens a second VISA session and never performs resource discovery.
+Click `Tools…` beside `Optimise logging coverage` to open the modeless DHO804 Tools window. The main tabbed workspace remains visible. The tools window reuses that panel's existing SCPI/VISA connection; it never opens a second VISA session and never performs resource discovery.
 
 The `Waveform recording` tab is the validation step required before production hardware-burst logging is enabled:
 
@@ -379,7 +383,9 @@ Events collected during each UI queue drain are sorted by their elapsed timestam
    telemetry**, the corresponding serial port, **115200 baud** and **LF**.
    Close other programs using that serial port. Opening USB serial can reset
    the telephone depending on its adapter; log a fresh boot for firmware metadata.
-4. Both profiles default to battery voltage and battery current. The GSMIV
+4. The 2281S defaults to six readings: terminal voltage, battery current, open-circuit
+   voltage, state of charge, remaining capacity and internal resistance. The GSMIV
+   profile defaults to battery voltage/current. The GSMIV
    profile also offers upstream VEXT, downstream VBUS and SYS voltage. Select
    up to two plotted channels; complete frames are retained regardless of selection.
 5. Choose **Use shared CSV**, choose a new capture file, enable **Log this
@@ -389,7 +395,7 @@ Events collected during each UI queue drain are sorted by their elapsed timestam
    board serial and revision, firmware commit/build, simulator settings,
    temperature, reference-instrument IDs/calibration and the load/sweep steps.
 
-The existing DMM/scope profiles can use the other two instrument panels.
+Add the existing DMM/scope profiles as additional instrument tabs.
 USB/VISA requires a working VISA backend/USB driver on the PC. If the instrument
 is missing, establish VISA discovery first; use the instrument's USB device
 port, not its USB memory-stick host port.
@@ -453,3 +459,18 @@ through its existing VISA connection; no USB flash drive is needed.
 Reference: [2281S Reference Manual](https://download.tek.com/manual/077114601_2281_Ref_Mar_2019.pdf),
 sections 3-62, 7-30, 7-33 and 7-37. Live transfer still needs validation with the
 physical 2281S; automated checks use representative instrument responses.
+
+## Workspace version 0.3.0
+
+New configuration files use schema version 2 and include instrument slots, Overview
+trace choices and its graph time window. Version-1 four-panel files remain loadable.
+Loading a workspace requires disconnected instruments; it does not reconnect,
+start polling or turn outputs on. Older files retain their original measurement
+selection. On a previously saved two-channel 2281S configuration, use **Add
+measurement** on Live data to enable the extra status readings.
+
+New 2281S profiles poll six values sequentially; the requested interval is a
+minimum cycle time, not a simultaneous sample guarantee. Current is positive
+when charging, capacity is in Ah, state of charge is percent, and resistance is
+in ohms. These additions use simulator queries only. Physical validation of
+these extra readbacks is still pending.

@@ -18,6 +18,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
+    QScrollArea,
+    QTabWidget,
     QMessageBox,
     QPushButton,
     QStackedWidget,
@@ -27,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from dmm_app.battery_models import BatteryModelDownloadWorker
+from dmm_app.overview import OverviewCard
 from dmm_app.clock import AcquisitionClock
 from dmm_app.commands import INSTRUMENT_PROFILES, InstrumentProfile, idn_matches_profile
 from dmm_app.logging_util import CsvLogger
@@ -65,7 +69,8 @@ from dmm_app.transport import SerialTransport, Transport, VisaTransport
 BAUD_RATES = ["1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200"]
 LINE_ENDINGS = {"LF (\\n)": b"\n", "CRLF (\\r\\n)": b"\r\n", "CR (\\r)": b"\r"}
 CONFIG_FILE_FORMAT = "scpi-lab-instrument-config"
-CONFIG_FILE_VERSION = 1
+CONFIG_FILE_VERSION = 2
+MAX_INSTRUMENTS = 16
 
 
 @dataclass
@@ -259,7 +264,7 @@ class InstrumentPanel(QGroupBox):
         self._snapshot_button = QPushButton("Snapshot")
         self._snapshot_button.clicked.connect(self.take_snapshot)
         controls.addWidget(self._snapshot_button)
-        self._add_button = QPushButton("Add")
+        self._add_button = QPushButton("Add measurement")
         self._add_button.clicked.connect(self._add_measurement)
         controls.addWidget(self._add_button)
         self._logging_checkbox = QCheckBox("Log this instrument")
@@ -497,6 +502,33 @@ class InstrumentPanel(QGroupBox):
         layout.addWidget(self._output_stack, stretch=1)
         self._configure_plot_range_controls(waveform=False)
 
+        # Move existing controls into focused pages, preserving every connection,
+        # signal and worker. Acquisition controls stay visible on either page.
+        measurement_layout.removeItem(controls)
+        controls.setParent(None)
+        layout.removeItem(output_controls)
+        output_controls.setParent(None)
+        self._detail_tabs = QTabWidget()
+        live = QWidget()
+        live_layout = QVBoxLayout(live)
+        live_layout.addWidget(self._measurement_section)
+        live_layout.addLayout(output_controls)
+        live_layout.addWidget(self._output_stack, 1)
+        setup = QWidget()
+        setup_layout = QVBoxLayout(setup)
+        for section in (self._profile_section, self._battery_model_controls,
+                        self._scope_section, self._tc08_section):
+            setup_layout.addWidget(section)
+        setup_layout.addStretch(1)
+        setup_scroll = QScrollArea()
+        setup_scroll.setWidgetResizable(True)
+        setup_scroll.setWidget(setup)
+        self._detail_tabs.addTab(live, "Live data")
+        self._detail_tabs.addTab(setup_scroll, "Setup && tools")
+        self._detail_tabs.setCurrentIndex(1)
+        layout.addLayout(controls)
+        layout.addWidget(self._detail_tabs, 1)
+
     @property
     def is_connected(self) -> bool:
         return bool(self._transport and self._transport.is_open)
@@ -614,6 +646,14 @@ class InstrumentPanel(QGroupBox):
             self._add_measurement_row(next(iter(profile.commands)), self._first_source(profile))
         if profile.instrument in (InstrumentType.GSMIV_POWER, InstrumentType.KEITHLEY_2281S):
             self._add_measurement_row(MeasurementFunction.BATTERY_CURRENT, "")
+        if profile.instrument == InstrumentType.KEITHLEY_2281S:
+            for function in (
+                MeasurementFunction.BATTERY_OPEN_CIRCUIT_VOLTAGE,
+                MeasurementFunction.BATTERY_SOC,
+                MeasurementFunction.BATTERY_CAPACITY,
+                MeasurementFunction.BATTERY_RESISTANCE,
+            ):
+                self._add_measurement_row(function, "")
         is_serial = profile.connection_kind == ConnectionKind.SERIAL
         endpoint_label = "Serial port" if is_serial else "Device" if is_tc08 else "VISA resource"
         self._endpoint_label.setText(endpoint_label)
@@ -1862,7 +1902,8 @@ class DMMAppWindow(QMainWindow):
         start_all = QPushButton("Start all connected")
         start_all.clicked.connect(self._start_all)
         toolbar.addWidget(start_all)
-        stop_all = QPushButton("Stop all")
+        stop_all = QPushButton("Stop all acquisition")
+        stop_all.setToolTip("Stops acquisition and downloads; does not turn instrument outputs off")
         stop_all.clicked.connect(self._stop_all)
         toolbar.addWidget(stop_all)
         self._save_config_button = QPushButton("Save config…")
@@ -1888,29 +1929,136 @@ class DMMAppWindow(QMainWindow):
         toolbar.addWidget(self._elapsed_label)
         layout.addLayout(toolbar)
 
-        grid = QGridLayout()
-        grid.setSpacing(8)
-        initial_profiles = (InstrumentType.NONE,) * 4
-        for index, instrument in enumerate(initial_profiles):
-            panel = InstrumentPanel(
-                instrument_index=index,
-                clock=self._clock,
-                event_sink=self._enqueue_event,
-                refresh_sink=self._refresh_endpoints,
-                endpoint_cache_provider=self._cached_endpoints,
-                logging_selection_sink=self._toggle_panel_logging,
-                waveform_output_directory_provider=self._waveform_output_directory,
-                initial_instrument=instrument,
-                parent=root,
-            )
-            self._panels.append(panel)
-            grid.addWidget(panel, index // 2, index % 2)
-        grid.setRowStretch(0, 1)
-        grid.setRowStretch(1, 1)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
-        layout.addLayout(grid, stretch=1)
+        self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
+        self._tabs.setTabsClosable(True)
+        self._tabs.setElideMode(Qt.ElideRight)
+        self._tabs.tabCloseRequested.connect(self._remove_instrument_tab)
+        self._overview = QWidget()
+        overview_layout = QVBoxLayout(self._overview)
+        overview_toolbar = QHBoxLayout()
+        self._overview_hint = QLabel("Add an instrument to start building your bench workspace.")
+        overview_toolbar.addWidget(self._overview_hint, 1)
+        overview_toolbar.addWidget(QLabel("Graph time window"))
+        self._overview_range = QComboBox()
+        for label, seconds in (("Last 60 s", 60.0), ("Last 5 min", 300.0), ("All data", None)):
+            self._overview_range.addItem(label, seconds)
+        self._overview_range.currentIndexChanged.connect(self._set_overview_range)
+        overview_toolbar.addWidget(self._overview_range)
+        overview_layout.addLayout(overview_toolbar)
+        cards = QWidget()
+        self._overview_grid = QGridLayout(cards)
+        self._overview_grid.setAlignment(Qt.AlignTop)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(cards)
+        overview_layout.addWidget(scroll, 1)
+        self._tabs.addTab(self._overview, "Overview")
+        for side in (self._tabs.tabBar().ButtonPosition.LeftSide,
+                     self._tabs.tabBar().ButtonPosition.RightSide):
+            self._tabs.tabBar().setTabButton(0, side, None)
+        self._add_instrument_button = QPushButton("+ Add instrument")
+        self._add_instrument_button.setMinimumHeight(28)
+        self._add_instrument_button.setMinimumWidth(150)
+        menu = QMenu(self._add_instrument_button)
+        for instrument in InstrumentType:
+            if instrument != InstrumentType.NONE:
+                action = menu.addAction(instrument.value)
+                action.triggered.connect(lambda checked=False, value=instrument: self.add_instrument(value))
+        self._add_instrument_button.setMenu(menu)
+        workspace_actions = QHBoxLayout()
+        workspace_actions.addWidget(self._add_instrument_button)
+        workspace_actions.addStretch(1)
+        layout.addLayout(workspace_actions)
+        self._overview_cards = {}
+        # Keep the original four stable slots for existing configuration files;
+        # empty slots have no visible tabs. Additional slots are created on demand.
+        for _ in range(4):
+            self._create_panel()
+        layout.addWidget(self._tabs, stretch=1)
         self._update_all_panel_logging_tooltips()
+
+    def _create_panel(self):
+        panel = InstrumentPanel(
+            instrument_index=len(self._panels), clock=self._clock,
+            event_sink=self._enqueue_event, refresh_sink=self._refresh_endpoints,
+            endpoint_cache_provider=self._cached_endpoints,
+            logging_selection_sink=self._toggle_panel_logging,
+            waveform_output_directory_provider=self._waveform_output_directory,
+            initial_instrument=InstrumentType.NONE, parent=self._tabs,
+        )
+        panel.hide()
+        self._panels.append(panel)
+        return panel
+
+    def add_instrument(self, instrument):
+        panel = next((p for p in self._panels if p._selected_instrument() == InstrumentType.NONE), None)
+        if panel is None:
+            if len(self._panels) >= MAX_INSTRUMENTS:
+                QMessageBox.information(self, "Workspace full", "This workspace supports up to 16 instruments.")
+                return None
+            panel = self._create_panel()
+        panel._instrument_combo.setCurrentText(instrument.value)
+        self._sync_workspace()
+        self._tabs.setCurrentWidget(panel)
+        panel._detail_tabs.setCurrentIndex(1)
+        return panel
+
+    def _remove_instrument_tab(self, index):
+        panel = self._tabs.widget(index)
+        if not isinstance(panel, InstrumentPanel):
+            return
+        if panel.is_connected or panel.is_running or panel.is_scope_tools_busy:
+            QMessageBox.information(self, "Instrument in use", "Stop and disconnect this instrument before removing its tab.")
+            return
+        panel._instrument_combo.setCurrentText(InstrumentType.NONE.value)
+        self._sync_workspace()
+
+    def _sync_workspace(self):
+        active = []
+        for panel in self._panels:
+            index = self._tabs.indexOf(panel)
+            key = panel.instrument_index
+            if panel._selected_instrument() == InstrumentType.NONE:
+                if index >= 0:
+                    self._tabs.removeTab(index)
+                    panel.hide()
+                card = self._overview_cards.pop(key, None)
+                if card is not None:
+                    self._overview_grid.removeWidget(card)
+                    card.deleteLater()
+                continue
+            active.append(panel)
+            short_name = {
+                InstrumentType.KEITHLEY_2281S: "2281S Battery",
+                InstrumentType.PICOLOG_TC08: "TC-08 Temperatures",
+                InstrumentType.RIGOL_DHO804: "DHO804 Scope",
+                InstrumentType.GSMIV_POWER: "GSMIV Power",
+                InstrumentType.OWON_SPE6103: "SPE6103 Supply",
+                InstrumentType.MP730889: "MP730889 DMM",
+                InstrumentType.RAW_SERIAL: "Serial Monitor",
+            }[panel._selected_instrument()]
+            title = f"{key + 1} · {short_name}"
+            if index < 0:
+                index = self._tabs.addTab(panel, title)
+            self._tabs.setTabText(index, title)
+            if key not in self._overview_cards:
+                card = OverviewCard(panel, lambda checked=False, p=panel: self._tabs.setCurrentWidget(p))
+                card.plot.set_scalar_window(self._overview_range.currentData())
+                self._overview_cards[key] = card
+            self._overview_cards[key].sync()
+        for position, panel in enumerate(active):
+            card = self._overview_cards[panel.instrument_index]
+            if self._overview_grid.indexOf(card) < 0 or self._overview_grid.getItemPosition(self._overview_grid.indexOf(card))[:2] != (position // 2, position % 2):
+                self._overview_grid.addWidget(card, position // 2, position % 2)
+        self._overview_hint.setText(
+            f"{len(active)} instruments · shared host receive-time clock"
+            if active else "Add an instrument to start building your bench workspace."
+        )
+
+    def _set_overview_range(self):
+        for card in self._overview_cards.values():
+            card.plot.set_scalar_window(self._overview_range.currentData())
 
     def _enqueue_event(self, kind: str, instrument_index: int, payload: object) -> None:
         self._events.put((kind, instrument_index, payload))
@@ -1938,6 +2086,10 @@ class DMMAppWindow(QMainWindow):
                 "enabled": panel.logging_enabled,
                 "individual_csv_path": self._panel_log_paths.get(instrument_index),
             }
+            card = self._overview_cards.get(instrument_index)
+            panel_document["overview"] = {
+                "traces": [combo.currentData() for combo in card.axes] if card else [-1, -1]
+            }
             panel_documents.append(panel_document)
         return {
             "format": CONFIG_FILE_FORMAT,
@@ -1946,6 +2098,7 @@ class DMMAppWindow(QMainWindow):
             "application": {
                 "use_shared_csv": self._log_checkbox.isChecked(),
                 "shared_csv_path": self._shared_log_path,
+                "overview_range": self._overview_range.currentData(),
             },
             "panels": panel_documents,
         }
@@ -1975,7 +2128,7 @@ class DMMAppWindow(QMainWindow):
         root = cls._configuration_mapping(document, "Configuration")
         if root.get("format") != CONFIG_FILE_FORMAT:
             raise ValueError("This is not an SCPI Lab Instrument configuration file.")
-        if root.get("version") != CONFIG_FILE_VERSION:
+        if root.get("version") not in (1, CONFIG_FILE_VERSION):
             raise ValueError(
                 f"Unsupported configuration version {root.get('version')!r}; "
                 f"this application supports version {CONFIG_FILE_VERSION}."
@@ -1993,9 +2146,11 @@ class DMMAppWindow(QMainWindow):
             if not shared_csv_path:
                 shared_csv_path_value = None
 
+        if application.get("overview_range", 60.0) not in (None, 60.0, 300.0):
+            raise ValueError("Invalid Overview graph time window.")
         panels = root.get("panels")
-        if not isinstance(panels, list) or len(panels) != 4:
-            raise ValueError("Configuration must contain exactly four instrument panels.")
+        if not isinstance(panels, list) or not 1 <= len(panels) <= MAX_INSTRUMENTS:
+            raise ValueError("Configuration must contain between 1 and 16 instrument panels.")
 
         for instrument_index, panel_value in enumerate(panels):
             prefix = f"panels[{instrument_index}]"
@@ -2041,6 +2196,14 @@ class DMMAppWindow(QMainWindow):
             expected_minimum = 0 if instrument == InstrumentType.NONE else 1
             if not expected_minimum <= len(measurements) <= profile.maximum_rows:
                 raise ValueError(f"{prefix}.measurements has an invalid number of rows.")
+            overview = panel.get("overview")
+            if overview is not None:
+                overview = cls._configuration_mapping(overview, f"{prefix}.overview")
+                traces = overview.get("traces")
+                if (not isinstance(traces, list) or len(traces) != 2
+                    or any(type(value) is not int or not -1 <= value < len(measurements)
+                           for value in traces)):
+                    raise ValueError(f"{prefix}.overview has invalid trace selections.")
             measurement_keys: set[tuple[MeasurementFunction, str]] = set()
             for row_index, measurement_value in enumerate(measurements):
                 row_name = f"{prefix}.measurements[{row_index}]"
@@ -2186,6 +2349,26 @@ class DMMAppWindow(QMainWindow):
         assert isinstance(application, dict)
         assert isinstance(panels, list)
 
+        if any(p.is_connected or p.is_running or p.is_scope_tools_busy for p in self._panels):
+            raise ValueError("Disconnect all instruments before loading a workspace.")
+        while not self._events.empty():
+            self._events.get_nowait()
+        for card in self._overview_cards.values():
+            self._overview_grid.removeWidget(card)
+            card.deleteLater()
+        self._overview_cards.clear()
+        while len(self._panels) < len(panels):
+            self._create_panel()
+        while len(self._panels) > len(panels):
+            panel = self._panels.pop()
+            tab_index = self._tabs.indexOf(panel)
+            if tab_index >= 0:
+                self._tabs.removeTab(tab_index)
+            card = self._overview_cards.pop(panel.instrument_index, None)
+            if card is not None:
+                self._overview_grid.removeWidget(card)
+                card.deleteLater()
+            panel.deleteLater()
         self._close_shared_logger()
         self._close_panel_loggers(clear_paths=True)
         with QSignalBlocker(self._log_checkbox):
@@ -2222,6 +2405,17 @@ class DMMAppWindow(QMainWindow):
                 panel._logging_checkbox.setChecked(bool(logging["enabled"]))
         self._update_loggers()
         self._update_all_panel_logging_tooltips()
+        self._sync_workspace()
+        self._overview_range.setCurrentIndex(
+            self._overview_range.findData(application.get("overview_range", 60.0))
+        )
+        for index, panel_configuration in enumerate(panels):
+            overview = panel_configuration.get("overview")
+            card = self._overview_cards.get(index)
+            if card is not None and isinstance(overview, dict):
+                for combo, slot in zip(card.axes, overview["traces"], strict=True):
+                    combo.setCurrentIndex(combo.findData(slot))
+        self._tabs.setCurrentWidget(self._overview)
 
     def _read_configuration_file(self, path: str) -> None:
         try:
@@ -2305,6 +2499,7 @@ class DMMAppWindow(QMainWindow):
             panel.stop_acquisition()
 
     def _process_events(self) -> None:
+        self._sync_workspace()
         pending: list[tuple[str, int, object]] = []
         while True:
             try:
@@ -2322,6 +2517,9 @@ class DMMAppWindow(QMainWindow):
             panel = self._panels[instrument_index]
             if kind == "reading" and isinstance(payload, Reading):
                 panel.consume_reading(payload)
+                card = self._overview_cards.get(instrument_index)
+                if card is not None:
+                    card.consume(payload)
                 logger = self._logger_for_instrument(instrument_index)
                 if logger is not None:
                     logger.write_reading(payload)

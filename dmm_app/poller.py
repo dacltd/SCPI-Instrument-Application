@@ -16,7 +16,7 @@ from dmm_app.transport import Transport
 def parse_primary_value(raw_response: str) -> float | None:
     token = raw_response.replace(",", " ").split()[0].strip() if raw_response.strip() else ""
     # Keithley may append the unit directly (e.g. -2.5E-02A).
-    match = re.fullmatch(r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?)(?:V|A|Hz)?", token)
+    match = re.fullmatch(r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?)(?:V|A|Hz|Ah|AH|OHM|Ohm|ohm|Ω|%)?", token)
     if not match:
         return None
     value = float(match.group(1))

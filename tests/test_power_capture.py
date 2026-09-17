@@ -151,7 +151,7 @@ class PowerGuiTests(unittest.TestCase):
             for index, instrument in enumerate((InstrumentType.KEITHLEY_2281S, InstrumentType.GSMIV_POWER)):
                 panel = window._panels[index]
                 panel._instrument_combo.setCurrentText(instrument.value)
-                self.assertEqual(len(panel._measurement_rows), 2)
+                self.assertEqual(len(panel._measurement_rows), 6 if index == 0 else 2)
                 requests, setup = panel._build_poll_requests()
                 self.assertEqual(setup, [])
                 self.assertEqual(requests[1].function, MeasurementFunction.BATTERY_CURRENT)

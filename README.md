@@ -1,7 +1,16 @@
 # SCPI Lab Instrument App
 
-A PySide6 desktop application for monitoring up to four SCPI, PicoSDK, or raw
+A PySide6 desktop application for monitoring up to sixteen SCPI, PicoSDK, or raw
 serial devices and recording their measurements on one shared timeline.
+
+## Tabbed workspace
+
+Use **+ Add instrument** to create an instrument tab. Overview shows the bench's
+latest readings and selectable graphs; each instrument tab contains Live data
+and Setup & tools. Connections and logging keep running when you switch tabs.
+Existing four-panel configuration files are supported.
+
+For the standalone Mac app, see [macOS installation and rebuilding](docs/macOS.md).
 
 ## Download the Windows application
 

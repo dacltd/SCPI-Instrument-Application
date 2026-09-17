@@ -49,7 +49,7 @@ INSTRUMENT_PROFILES: dict[InstrumentType, InstrumentProfile] = {
         connection_kind=ConnectionKind.VISA,
         idn_query="*IDN?",
         idn_expected_tokens=("2281S-20-6",),
-        maximum_rows=2,
+        maximum_rows=6,
         commands={
             MeasurementFunction.BATTERY_VOLTAGE: MeasurementCommand(
                 function=MeasurementFunction.BATTERY_VOLTAGE,
@@ -64,6 +64,15 @@ INSTRUMENT_PROFILES: dict[InstrumentType, InstrumentProfile] = {
                 unit="A",
                 value_scale=-1.0,  # Keithley simulator: negative means charging.
             ),
+            **{
+                function: MeasurementCommand(function, (), command, unit)
+                for function, command, unit in (
+                    (MeasurementFunction.BATTERY_OPEN_CIRCUIT_VOLTAGE, ":BATTery:SIMulator:VOC?", "V"),
+                    (MeasurementFunction.BATTERY_SOC, ":BATTery:SIMulator:SOC?", "%"),
+                    (MeasurementFunction.BATTERY_CAPACITY, ":BATTery:SIMulator:CAPacity?", "Ah"),
+                    (MeasurementFunction.BATTERY_RESISTANCE, ":BATTery:SIMulator:RESistance?", "Ω"),
+                )
+            },
         },
     ),
     InstrumentType.GSMIV_POWER: InstrumentProfile(

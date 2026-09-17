@@ -4,7 +4,7 @@
 Four-panel desktop acquisition application for correlating SCPI, PicoSDK, and raw serial measurements on one local software timebase.
 
 ## Current objective
-Monitor up to four independently connected serial, VISA, or PicoSDK instruments, including a RIGOL DHO804, PicoLog USB TC-08, and a raw serial data source, and write all readings to one synchronized CSV timeline.
+Monitor up to sixteen independently connected serial, VISA, or PicoSDK instruments, including a RIGOL DHO804, PicoLog USB TC-08, and a raw serial data source, and write all readings to one synchronized CSV timeline.
 
 ## Workspace path
 - `/Users/david/Code/Git/SCPI Lab Instrument App`
@@ -108,3 +108,7 @@ Monitor up to four independently connected serial, VISA, or PicoSDK instruments,
 - Polling: Periodic query loop for measurement collection.
 - CSV: Comma Separated Values log format.
 - Venv: Python virtual environment for isolated dependencies.
+
+## Version 0.3.0 workspace
+
+Overview plus per-instrument Live data and Setup & tools pages replace the fixed grid. Instrument slots stay stable for logging; empty slots are hidden and additional devices are created on demand (maximum 16). Schema-2 configurations retain Overview trace choices and load schema-1 files. Keithley monitoring adds VOC, SOC, remaining Ah and internal resistance. Existing acquisition workers feed both views without extra queries.

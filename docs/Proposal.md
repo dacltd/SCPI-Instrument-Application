@@ -1,10 +1,10 @@
 # SCPI Lab Instrument App Proposal
 
 ## Goal
-Build a desktop acquisition workspace for engineers to monitor up to four SCPI or raw serial devices at once, correlate their readings on one local software timebase, and scale to additional instruments and transports without redesigning the GUI or acquisition pipeline.
+Build a desktop acquisition workspace for engineers to monitor up to sixteen SCPI or raw serial devices at once, correlate their readings on one local software timebase, and scale to additional instruments and transports without redesigning the GUI or acquisition pipeline.
 
 ## Scope (Current release)
-1. Show four identical, independently configurable instrument panels in a 2×2 workspace.
+1. Show an Overview dashboard and dedicated tabs for up to sixteen independently configured instruments.
 2. Support Multicomp MP730889 DMM and Owon SPE6103 PSU serial-SCPI profiles.
 3. Support a RIGOL DHO804 oscilloscope profile over VISA (USBTMC or LAN).
 4. Support a raw serial monitor with selectable port, baud rate, and LF/CRLF/CR line termination.
@@ -26,7 +26,7 @@ Build a desktop acquisition workspace for engineers to monitor up to four SCPI o
 20. Support zero-added-delay repeated capture, cache stable waveform preamble data, write waveform files through a bounded background queue, and report measured transfer, file-write, blind-gap, and coverage estimates.
 21. Toggle every panel between its text history and a live graph. Scalar instruments plot at most two configured rows against shared elapsed time with independent left/right Y axes; DHO804 waveform captures plot calibrated voltage against preamble-derived time in either the configured scope viewport or the full RAW record.
 22. Provide a modeless DHO804 Tools window for maximum waveform-record frame queries, automated hardware-record capability testing, per-frame timestamp/RAW verification, diagnostic export, command logging, and guarded expert SCPI access.
-23. Save and load all four panels' reusable settings in a versioned JSON configuration file without reconnecting hardware, starting acquisition, or treating a saved oscilloscope safety acknowledgement/setup as currently valid.
+23. Save and load all configured instruments' reusable settings in a versioned JSON configuration file without reconnecting hardware, starting acquisition, or treating a saved oscilloscope safety acknowledgement/setup as currently valid.
 
 ## Non-Goals (current release)
 - Full command coverage for either instrument in first release.
@@ -46,7 +46,7 @@ Build a desktop acquisition workspace for engineers to monitor up to four SCPI o
 - `Plotting`: dependency-free Qt painting with rolling/all-data scalar views, independent two-trace Y scales, little-endian DHO804 WORD decoding, scope division grids, trigger markers, min/max waveform envelopes that preserve narrow peaks, and a fresh-data indicator.
 - `Logger`: one shared CSV stream for opted-in panels when shared mode is selected, or independent CSV streams and paths for opted-in panels when shared mode is off.
 - `Configuration`: validated, versioned JSON persistence for application logging routing and each panel's profile, endpoint, measurements, acquisition, graph and oscilloscope controls; runtime connection and hardware-applied state are excluded.
-- `GUI`: PySide6 (Qt) four-panel workspace with independent and coordinated controls.
+- `GUI`: PySide6 (Qt) tabbed workspace with independent and coordinated controls.
 
 ## SCPI Baseline Used
 From the reviewed Multicomp and Owon SCPI manuals:
@@ -84,7 +84,7 @@ The DHO804 command form and measurement tokens follow the official [RIGOL DHO800
 - Which external signal should be used if startup, load-step, protection or rare-event triggering is added?
 
 ## Acceptance Criteria
-- The application displays exactly four independent instrument panels.
+- The application displays Overview and one tab per configured instrument, supporting duplicate instrument types and up to sixteen devices.
 - User can connect serial profiles by port/baud and the DHO804 by a discovered or manually entered VISA resource.
 - User can issue `*IDN?` for any SCPI panel.
 - Connection is rejected if selected profile does not match returned IDN.
@@ -111,7 +111,7 @@ The DHO804 command form and measurement tokens follow the official [RIGOL DHO800
 - Each panel can switch between Text and Graph without affecting acquisition. Graph view temporarily collapses the control sections to maximise plot area and restores their prior state on return to Text.
 - A flashing red dot appears at the graph's top right only after fresh data arrives during an active stream; it disappears on Stop/disconnect or when readings become stale.
 - Changing another panel's profile uses cached endpoints, and endpoint refresh defers VISA discovery while a VISA worker is active, so UI configuration cannot disturb an in-progress waveform transfer.
-- `Save config…` records all four panels and logging routing in versioned JSON. `Load config…` validates the complete document before applying it, requires all instruments to be disconnected, preserves manually entered endpoints, and never reconnects, starts acquisition, restores readings, or marks DHO804 safety/setup as applied.
+- `Save config…` records all instrument slots and logging routing in versioned JSON. `Load config…` validates the complete document before applying it, requires all instruments to be disconnected, preserves manually entered endpoints, and never reconnects, starts acquisition, restores readings, or marks DHO804 safety/setup as applied.
 - Scalar graphs display measurement slots one and two only, using blue/left and orange/right independently auto-scaled axes with one shared selectable time window.
 - DHO804 graphs decode the hardware-validated little-endian WORD payload with the stored preamble and display the latest waveform using the configured time/div, V/div and trigger level or the complete RAW record.
 - DHO804 Tools remains modeless but serialises all operations through the panel's existing SCPI client. Its controls lock during normal acquisition, and the panel's acquisition controls lock during a diagnostic operation.

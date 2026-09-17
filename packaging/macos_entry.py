@@ -45,7 +45,7 @@ def main() -> int:
             window = DMMAppWindow()
             window.show()
             if smoke_test:
-                panel = window._panels[0]
+                panel = window.add_instrument(InstrumentType.KEITHLEY_2281S)
                 panel._instrument_combo.setCurrentText(InstrumentType.KEITHLEY_2281S.value)
                 battery_download_controls = not panel._battery_model_controls.isHidden()
                 battery_model_slots = panel._battery_model_slot.count()
@@ -61,6 +61,9 @@ def main() -> int:
                 with closing(pyvisa.ResourceManager("@py")) as manager:
                     report = {
                         "version": __version__,
+                        "overview_tab": window._tabs.tabText(0),
+                        "instrument_pages": panel._detail_tabs.count(),
+                        "workspace_tabs": window._tabs.count(),
                         "battery_download_controls": battery_download_controls,
                         "battery_model_slots": battery_model_slots,
                         "tc08_profile": InstrumentType.PICOLOG_TC08 in INSTRUMENT_PROFILES,

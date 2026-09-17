@@ -55,7 +55,7 @@ QT_QPA_PLATFORM=offscreen 'dist/SCPI Lab Instrument.app/Contents/MacOS/SCPI Lab 
 cat /tmp/scpi-smoke.json
 ```
 
-The smoke test opens the main window offscreen, loads the bundled USB backend and PyVISA Python backend, checks that the capture profiles are present, writes a JSON report, and exits. It does not verify communication with a physical instrument. Successful fields are `frozen`, `usb_backend_loaded`, `window_visible`, `keithley_profile` and `gsmiv_profile`, all `true`, with four panels.
+The smoke test opens the main window offscreen, loads the bundled USB backend and PyVISA Python backend, checks that the capture profiles are present, writes a JSON report, and exits. It does not verify communication with a physical instrument. Successful fields are `frozen`, `usb_backend_loaded`, `window_visible`, `keithley_profile` and `gsmiv_profile`, all `true`. `overview_tab` is `Overview`, and `instrument_pages` is 2.
 
 The smoke report also checks `tc08_profile`, eight `tc08_channels`, and selectable
 `tc08_measurements`. `tc08_driver_loaded` reports whether the separately installed
