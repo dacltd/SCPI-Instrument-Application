@@ -1,4 +1,4 @@
 pyserial>=3.5
 PyVISA>=1.14
-PyVISA-py>=0.7
+PyVISA-py[hislip-discovery,psutil,serial,usb-full]>=0.7
 PySide6>=6.6

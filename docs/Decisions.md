@@ -271,3 +271,33 @@ Bench arrangements are repeatedly reused and manually rebuilding profiles, measu
 - Pros: repeatable setups, human-readable files, explicit schema versioning and validation before mutation.
 - Pros: manually entered VISA/serial endpoints remain reusable even when discovery does not currently find the device.
 - Cons: operators must reconnect devices and re-verify/apply DHO804 settings after every load.
+
+## 2026-09-03 - Load the installed native PicoSDK driver for USB TC-08 support
+
+### Decision
+
+Add the PicoLog USB TC-08 as a first-class instrument profile and call the
+installed 64-bit `usbtc08` driver through a small, typed `ctypes` adapter. Load
+the DLL only when a TC-08 connection is requested. Use PicoSDK Get Single mode
+for snapshots and repeated full conversions in the first release.
+
+### Why
+
+The TC-08 API is a stable native C interface and the required driver is already
+distributed by Pico Technology. A local adapter keeps the packaged application
+self-contained at the Python layer, avoids depending on a third-party wrapper,
+and lets Windows CI build and smoke-test the application without connected lab
+hardware or proprietary driver installation.
+
+### Consequences
+
+- Pros: eight thermocouple channels, cold-junction readings, all standard
+  thermocouple types, four temperature units, mains rejection, overflow status,
+  graphs, CSV logging, and saved configurations fit the existing panel model.
+- Pros: users who do not use a TC-08 can run the application without PicoSDK.
+- Cons: the target Windows PC must have the 64-bit PicoSDK installed separately,
+  and GitHub CI can validate the adapter with a simulated driver but cannot
+  validate a physical logger.
+- Cons: Get Single mode timestamps conversions on receipt and is best suited to
+  ordinary temperature logging; a later hardware-validated streaming mode would
+  be needed for uninterrupted device-clock acquisition at the fastest cadence.

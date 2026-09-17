@@ -1,10 +1,10 @@
 # Context
 
 ## Project one liner
-Four-panel desktop acquisition application for correlating SCPI measurements and raw serial device output on one local software timebase.
+Four-panel desktop acquisition application for correlating SCPI, PicoSDK, and raw serial measurements on one local software timebase.
 
 ## Current objective
-Monitor up to four independently connected serial or VISA instruments, including a RIGOL DHO804 and a raw serial data source, and write all readings to one synchronized CSV timeline.
+Monitor up to four independently connected serial, VISA, or PicoSDK instruments, including a RIGOL DHO804, PicoLog USB TC-08, and a raw serial data source, and write all readings to one synchronized CSV timeline.
 
 ## Workspace path
 - `/Users/david/Code/Git/SCPI Lab Instrument App`
@@ -17,6 +17,7 @@ Monitor up to four independently connected serial or VISA instruments, including
 - `dmm_app/scpi.py`: SCPI client wrapper for command/query and typed IEEE block failures.
 - `dmm_app/commands.py`: instrument profiles and measurement command catalog.
 - `dmm_app/poller.py`: background polling worker.
+- `dmm_app/pico_tc08.py`: lazy native PicoSDK binding, USB TC-08 lifecycle, and temperature acquisition worker.
 - `dmm_app/oscilloscope.py`: DHO804 setup model, trigger worker, and RAW waveform export.
 - `dmm_app/scope_tools.py`: modeless DHO804 waveform-record diagnostic, per-frame RAW verification/export, and guarded SCPI console.
 - `dmm_app/plotting.py`: two-axis scalar and calibrated DHO804 waveform graph widgets.
@@ -36,9 +37,10 @@ Monitor up to four independently connected serial or VISA instruments, including
 - 2026-02-11: Added duplicate-function guards for multi-row measurements.
 - 2026-02-11: Chose modular architecture (transport/client/poller/commands/gui) to support future expansion to all supported instrument functions.
 - 2026-02-11: Chose CSV as the initial log format for interoperability with lab workflows.
+- 2026-09-03: Added a PicoLog USB TC-08 profile using the installed native 64-bit PicoSDK driver without making that driver a startup dependency for other profiles.
 
 ## Constraints
-- OS: macOS development environment; target desktop OS may include Windows/macOS/Linux.
+- OS: macOS development environment; the downloadable packaged target is Windows x64.
 - Tooling: Python 3.12+ recommended, `pyserial`, `PyVISA`, `PyVISA-py`, `PySide6` (Qt), virtual environment per repo.
 - Security: local-only communication with instrument; no remote service exposure in MVP.
 - Performance targets:
@@ -60,6 +62,7 @@ Monitor up to four independently connected serial or VISA instruments, including
 - GUI interaction contract:
   - User selects instrument profile prior to connection.
   - User selects serial port/baud or a VISA resource prior to connection.
+  - A TC-08 panel opens the first available USB logger through `usbtc08.dll`; its enabled thermocouple types, units, and mains rejection are persisted in configuration.
   - Enabling shared mode selects one shared destination; panel checkboxes then opt instruments into that file without another prompt.
   - With shared mode off, enabling a panel asks for that panel's individual destination. Disabling an active shared mode confirms and then unticks all participating panels.
   - OWON supports multiple measurement rows; MP is single-row only.
@@ -74,6 +77,7 @@ Monitor up to four independently connected serial or VISA instruments, including
 - Some devices require explicit remote-control enablement before SCPI commands.
 - Serial parameters beyond baud (parity/stop bits) may need exposure for certain interfaces/adapters.
 - PySide6 installation can fail on older/system Python distributions; team should align on one supported Python runtime.
+- TC-08 use on Windows requires the matching 64-bit PicoSDK to be installed, and physical-device behavior is not covered by GitHub-hosted CI.
 
 ## Next actions
 - Add OWON oscilloscope support as an additional profile (ID validation + SCPI command map + capability gating in GUI).
@@ -90,6 +94,7 @@ Monitor up to four independently connected serial or VISA instruments, including
 - Add GUI controls for advanced serial options (parity, data bits, stop bits, timeout).
 - Add additional measurement functions to `dmm_app/commands.py`.
 - Add physical-hardware integration tests after the bench devices are available.
+- Validate the TC-08 profile on Windows with the installed 64-bit PicoSDK and physical logger, including channel types, overflow, cadence, logging, and reconnect behavior.
 - Validate the graph fresh-data indicator and IEEE recovery sequence with deliberate USB/LAN interruptions on the physical DHO804.
 - Add log rotation or session-based file naming option.
 - Add model-specific capability gating after ID query.
