@@ -231,7 +231,8 @@ class SequenceAborted(Exception):
 
 class SequenceRunner(threading.Thread):
     """Sequential completion-relative dwells; never catch up by skipping dwell time."""
-    def __init__(self, document, controllers, clock, event_path, on_event):
+    def __init__(self, document, controllers, clock, event_path, on_event,
+                 ready_events=(), ready_timeout_seconds=75.0):
         super().__init__(daemon=True)
         self.document = validate_sequence(document)
         if set(controllers) != set(self.document['instruments']):
@@ -239,6 +240,8 @@ class SequenceRunner(threading.Thread):
         for role, controller in controllers.items():
             if controller.model != self.document['instruments'][role]['model']:
                 raise ValueError(f'Wrong instrument model for {role}')
+        self.ready_events = tuple(ready_events)
+        self.ready_timeout_seconds = number(ready_timeout_seconds, "Ready timeout", .01, 3600)
         self.controllers = controllers
         self.clock = clock
         self.event_path = Path(event_path)
@@ -310,6 +313,16 @@ class SequenceRunner(threading.Thread):
         try:
             self._file = self.event_path.open('x', encoding='utf-8')
             self.emit('run_start', name=self.document['name'])
+            if self.ready_events:
+                self.emit('acquisition_wait', detail='Waiting for first post-settling DMM reading')
+                deadline = time.monotonic() + self.ready_timeout_seconds
+                while not all(event.is_set() for event in self.ready_events):
+                    self.checkpoint()
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError('No post-settling DMM reading before acquisition timeout')
+                    with self._condition:
+                        self._condition.wait(.05)
+                self.emit('acquisition_ready')
             for role, controller in self.controllers.items():
                 self.checkpoint()
                 snapshot = controller.preflight([s for s in self.document['steps'] if s['instrument'] == role])

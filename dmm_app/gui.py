@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
 import queue
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +12,7 @@ from pathlib import Path
 from PySide6.QtCore import QSignalBlocker, Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
+    QDoubleSpinBox,
     QComboBox,
     QFileDialog,
     QGridLayout,
@@ -161,6 +164,9 @@ class InstrumentPanel(QGroupBox):
         self._sections_before_graph: tuple[bool, bool, bool, bool] | None = None
         self._stream_requested = False
         self._automation_locked = False
+        self._dmm_setup_client = None
+        self._dmm_setup_commands = None
+        self._dmm_configured_at = None
         self._scope_tools_dialog: DHO804ToolsDialog | None = None
 
         self._build_ui()
@@ -219,6 +225,24 @@ class InstrumentPanel(QGroupBox):
         self._status_label = QLabel("Disconnected")
         self._status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         connection.addWidget(self._status_label, 2, 0, 1, 9)
+        self._settling_label = QLabel("After configuration")
+        self._settling_input = QDoubleSpinBox()
+        self._settling_input.setRange(0.5, 60.0)
+        self._settling_input.setDecimals(1)
+        self._settling_input.setSingleStep(0.5)
+        self._settling_input.setValue(5.0)
+        self._settling_input.setSuffix(" s settling")
+        self._settling_input.setToolTip(
+            "Wait before the first Multicomp reading after configuration. Subsequent snapshots reuse the setup. "
+            "5 seconds is a provisional default; increase if your meter needs longer. "
+            "Zero readings after the delay are retained."
+        )
+        connection.addWidget(self._settling_label, 3, 0)
+        connection.addWidget(self._settling_input, 3, 1, 1, 2)
+        self._dmm_reapply = QPushButton("Reapply measurement setup")
+        self._dmm_reapply.setToolTip("Use after changing the meter's front-panel setup or resetting the meter.")
+        self._dmm_reapply.clicked.connect(self._reapply_dmm_setup)
+        connection.addWidget(self._dmm_reapply, 3, 3, 1, 3)
         self._profile_section = CollapsibleSection("Profile & Connection", connection_content)
         layout.addWidget(self._profile_section)
 
@@ -621,6 +645,7 @@ class InstrumentPanel(QGroupBox):
         self.refresh_endpoints(serial_ports, visa_resources, preserve_selection=False)
 
     def _reload_profile(self) -> None:
+        self._invalidate_dmm_setup()
         profile = self._selected_profile()
         has_instrument = profile.instrument != InstrumentType.NONE
         is_scope = profile.instrument == InstrumentType.RIGOL_DHO804
@@ -670,6 +695,9 @@ class InstrumentPanel(QGroupBox):
         self._connect_button.setVisible(has_instrument)
         self._interval_label.setVisible(has_instrument and not profile.is_raw_serial)
         self._interval_input.setVisible(has_instrument and not profile.is_raw_serial)
+        self._settling_label.setVisible(profile.instrument == InstrumentType.MP730889)
+        self._settling_input.setVisible(profile.instrument == InstrumentType.MP730889)
+        self._dmm_reapply.setVisible(profile.instrument == InstrumentType.MP730889)
         self._acquisition_mode_label.setVisible(is_scope)
         self._acquisition_mode_combo.setVisible(is_scope)
         self._idn_button.setVisible(has_instrument and profile.supports_identity_query)
@@ -710,6 +738,7 @@ class InstrumentPanel(QGroupBox):
             "acquisition": {
                 "mode": str(self._acquisition_mode_combo.currentData()),
                 "interval_ms": self._interval_input.text(),
+                "settling_seconds": self._settling_input.value(),
             },
             "measurements": [
                 {
@@ -796,6 +825,7 @@ class InstrumentPanel(QGroupBox):
         assert isinstance(acquisition, dict)
         self._set_combo_data(self._acquisition_mode_combo, acquisition["mode"])
         self._interval_input.setText(str(acquisition["interval_ms"]))
+        self._settling_input.setValue(acquisition.get("settling_seconds", 5.0))
 
         self._clear_measurement_rows()
         measurements = configuration["measurements"]
@@ -960,6 +990,8 @@ class InstrumentPanel(QGroupBox):
                 row.source_combo.setCurrentText(row.last_valid_source or "—")
             QMessageBox.warning(self, "Duplicate Measurement", "Each measurement/source pair must be unique.")
             return
+        if (row.last_valid_function, row.last_valid_source) != (function, source):
+            self._invalidate_dmm_setup()
         row.last_valid_function = function
         row.last_valid_source = source
 
@@ -1003,6 +1035,8 @@ class InstrumentPanel(QGroupBox):
         waveform_ready = (
             self._scope_safety_checkbox.isChecked() and self._scope_setup_applied is not None
         )
+        self._settling_input.setEnabled(not running and not self._automation_locked)
+        self._dmm_reapply.setEnabled(connected and not running and not self._automation_locked)
         self._start_button.setEnabled(
             connected and not running and not tools_busy and (not waveform_mode or waveform_ready)
         )
@@ -1381,6 +1415,7 @@ class InstrumentPanel(QGroupBox):
             return False
 
     def _close_transport(self) -> None:
+        self._invalidate_dmm_setup()
         if self._transport:
             try:
                 self._transport.close()
@@ -1648,8 +1683,7 @@ class InstrumentPanel(QGroupBox):
                 return False
             try:
                 requests, setup_commands = self._build_poll_requests()
-                for command in setup_commands:
-                    self._scpi.write(command)
+                initial_delay = self._prepare_scpi_setup(setup_commands)
             except Exception as exc:  # pragma: no cover - hardware dependency
                 QMessageBox.critical(self, "Configuration failed", str(exc))
                 return False
@@ -1662,6 +1696,7 @@ class InstrumentPanel(QGroupBox):
                 device_idn=self._device_idn,
                 measurements=requests,
                 interval_seconds=interval_seconds,
+                initial_delay_seconds=initial_delay,
                 on_reading=lambda reading: self._event_sink("reading", self.instrument_index, reading),
                 on_error=lambda error: self._event_sink("error", self.instrument_index, error),
                 start_gate=start_gate,
@@ -1674,6 +1709,10 @@ class InstrumentPanel(QGroupBox):
             message = f"Repeated RAW waveform logging started. Files: {repeated_output_directory}"
         else:
             message = "Polling started."
+        if isinstance(self._worker, PollingWorker) and initial_delay > 0:
+            message += f" Settling for {initial_delay:.1f} s before recording."
+            for row in self._measurement_rows:
+                row.latest_label.setText("Settling…")
         self._append_output(message)
         self._stream_requested = True
         self._worker.start()
@@ -1687,7 +1726,7 @@ class InstrumentPanel(QGroupBox):
             self._worker.stop()
             self._worker.join(timeout=1.5)
             if isinstance(
-                self._worker, (RepeatedWaveformCaptureWorker, PicoTC08Worker, BatteryModelDownloadWorker)
+                self._worker, (PollingWorker, RepeatedWaveformCaptureWorker, PicoTC08Worker, BatteryModelDownloadWorker)
             ) and self._worker.is_alive():
                 if announce:
                     operation = (
@@ -1695,6 +1734,8 @@ class InstrumentPanel(QGroupBox):
                         if isinstance(self._worker, RepeatedWaveformCaptureWorker)
                         else "battery-model download"
                         if isinstance(self._worker, BatteryModelDownloadWorker)
+                        else "measurement query"
+                        if isinstance(self._worker, PollingWorker)
                         else "TC-08 conversion"
                     )
                     self._append_output(f"Stop requested; waiting for the current {operation}.")
@@ -1739,7 +1780,46 @@ class InstrumentPanel(QGroupBox):
         if status == "error":
             QMessageBox.critical(self, "Battery-model download failed", message)
 
+    def _invalidate_dmm_setup(self):
+        self._dmm_setup_client = None
+        self._dmm_setup_commands = None
+        self._dmm_configured_at = None
+
+    def _prepare_scpi_setup(self, commands, *, force=False):
+        """Cache only the Multicomp setup, scoped to this connection and function."""
+        is_dmm = self._selected_instrument() == InstrumentType.MP730889
+        signature = tuple(commands)
+        if (not is_dmm or force or self._dmm_setup_client is not self._scpi
+            or self._dmm_setup_commands != signature):
+            self._invalidate_dmm_setup()
+            for command in commands:
+                self._scpi.write(command)
+            if is_dmm:
+                self._dmm_setup_client = self._scpi
+                self._dmm_setup_commands = signature
+                self._dmm_configured_at = time.monotonic()
+        if is_dmm and self._dmm_configured_at is not None:
+            return max(0.0, self._dmm_configured_at + self._settling_seconds() - time.monotonic())
+        return 0.0
+
+    def _reapply_dmm_setup(self):
+        if (self._selected_instrument() != InstrumentType.MP730889 or not self._scpi
+            or self.is_running or self._automation_locked):
+            return
+        try:
+            _, commands = self._build_poll_requests()
+            delay = self._prepare_scpi_setup(commands, force=True)
+            self._append_output(f"Measurement setup reapplied. Allow {delay:.1f} s to settle before recording.")
+        except Exception as exc:
+            self._invalidate_dmm_setup()
+            QMessageBox.warning(self, "Configuration failed", str(exc))
+
+    def _settling_seconds(self) -> float:
+        return self._settling_input.value() if self._selected_instrument() == InstrumentType.MP730889 else 0.0
+
     def take_snapshot(self, _checked: bool = False) -> None:
+        if self.is_running or self._automation_locked:
+            return
         if self._selected_instrument() == InstrumentType.PICOLOG_TC08:
             if not isinstance(self._transport, PicoTC08Device):
                 QMessageBox.warning(self, "Not connected", "Connect to the TC-08 first.")
@@ -1779,10 +1859,26 @@ class InstrumentPanel(QGroupBox):
             return
         try:
             requests, setup_commands = self._build_poll_requests()
-            for command in setup_commands:
-                self._scpi.write(command)
+            initial_delay = self._prepare_scpi_setup(setup_commands)
             profile = self._selected_profile()
             endpoint = self._endpoint_combo.currentText().strip()
+            if profile.instrument == InstrumentType.MP730889:
+                self._worker = PollingWorker(
+                    scpi=self._scpi, clock=self._clock, instrument_index=self.instrument_index,
+                    connection=endpoint, instrument=profile.instrument, device_idn=self._device_idn,
+                    measurements=requests, interval_seconds=0,
+                    initial_delay_seconds=initial_delay, single_shot=True,
+                    on_reading=lambda reading: self._event_sink("reading", self.instrument_index, reading),
+                    on_error=lambda error: self._event_sink("error", self.instrument_index, error),
+                    on_complete=lambda message: self._event_sink("capture_complete", self.instrument_index, message),
+                )
+                self._append_output(f"Snapshot: settling for {initial_delay:.1f} s before recording."
+                                    if initial_delay > 0 else "Snapshot: reading current measurement.")
+                for row in self._measurement_rows:
+                    row.latest_label.setText("Settling…" if initial_delay > 0 else "Reading…")
+                self._worker.start()
+                self._refresh_controls()
+                return
             for request in requests:
                 raw = self._scpi.query(request.query_command)
                 timestamp, elapsed_seconds, acquisition_run = self._clock.capture()
@@ -1832,6 +1928,7 @@ class InstrumentPanel(QGroupBox):
             self._append_output(f"Graph update error: {exc}")
 
     def handle_worker_error(self, error: object) -> None:
+        self._invalidate_dmm_setup()
         self._stream_requested = False
         self._append_output(f"Acquisition error: {error}")
         self.stop_acquisition(announce=False)
@@ -2203,6 +2300,11 @@ class DMMAppWindow(QMainWindow):
             cls._configuration_string(
                 acquisition.get("interval_ms"), f"{prefix}.acquisition.interval_ms"
             )
+
+            settling = acquisition.get("settling_seconds", 5.0)
+            if (isinstance(settling, bool) or not isinstance(settling, (int, float))
+                or not math.isfinite(settling) or not .5 <= settling <= 60):
+                raise ValueError(f"{prefix}.acquisition.settling_seconds must be 0.5–60 seconds.")
 
             measurements = panel.get("measurements")
             if not isinstance(measurements, list):

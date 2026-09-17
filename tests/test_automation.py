@@ -375,3 +375,29 @@ def test_aborting_while_paused_is_prompt(document, tmp_path):
     runner.join(1)
     assert runner.result == 'aborted'
     assert not any(c.calls for c in controllers.values())
+
+
+def test_dmm_readiness_precedes_any_setting_write(document, tmp_path):
+    ready = threading.Event()
+    waiting = threading.Event()
+    runner, controllers, events = runner_for(fast(document), tmp_path,
+        lambda e: waiting.set() if e['event'] == 'acquisition_wait' else None)
+    runner.ready_events = (ready,)
+    runner.start()
+    assert waiting.wait(1)
+    assert not any(c.calls for c in controllers.values())
+    ready.set()
+    runner.join(2)
+    assert runner.result == 'complete'
+    names = [e['event'] for e in events]
+    assert names.index('acquisition_ready') < names.index('command_start')
+
+
+def test_missing_dmm_readiness_times_out_without_mutations(document, tmp_path):
+    runner, controllers, events = runner_for(fast(document), tmp_path)
+    runner.ready_events = (threading.Event(),)
+    runner.ready_timeout_seconds = .01
+    runner.run()
+    assert runner.result == 'failed'
+    assert not any(c.calls for c in controllers.values())
+    assert not events[-1]['cleanup_attempted']

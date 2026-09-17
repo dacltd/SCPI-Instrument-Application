@@ -185,3 +185,13 @@ while running. No model upload/recall, automatic error clearing, or reset occurs
 
 Software tests use simulated instruments. Physical command compatibility,
 read-back tolerances, switching behaviour and dwell sufficiency remain bench checks.
+
+### Multicomp acquisition startup (0.4.1)
+
+The DMM configures its selected function once per connection/measurement change,
+then reuses it for snapshots and polling. Its configurable post-configuration
+settling wait defaults to 5 seconds. Automation waits for its first valid reading
+before starting instrument settings; lack of readiness times out after 75 seconds.
+No DMM readings are captured during that initial settling wait. See the
+[Multicomp settling instructions](UserGuide.md#multicomp-snapshots-and-settling-041)
+for front-panel changes and manual reapplication of the setup.

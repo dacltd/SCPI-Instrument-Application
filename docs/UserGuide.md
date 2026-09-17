@@ -482,3 +482,31 @@ Use the consolidated **Automation** tab for timed OWON SPE6103 and Keithley
 2281S steps, editable dwell periods, instrument assignments and end/abort actions.
 It includes loadable USB-check and battery-policy plateau examples. See
 [the automation guide](Automation.md) for setup, script format and bench limits.
+
+## Multicomp snapshots and settling (0.4.1)
+
+The MP730889 setup is reused within a connection. The first Start/Snapshot
+configures the selected DC voltage/current function; subsequent snapshots and
+Stop/Start cycles query the existing measurement without sending `CONFigure`
+again. Changing the selected measurement, reconnecting, or an acquisition error
+invalidates that setup. Other instrument profiles keep their existing behaviour.
+
+**Setup & tools → After configuration** sets the wait before the first recorded
+reading after configuration. The default is **5 seconds**, adjustable from
+0.5–60 seconds and saved in workspace configurations. This is a provisional
+response to the observed startup-zero behaviour, not a verified device-ready
+signal. Check it against the front-panel reading and increase it if necessary.
+No readings are queried or logged during that initial wait; genuine zero readings
+afterward are preserved. Snapshot runs in the background, and Stop cancels it.
+If cancelled partway through settling, the next snapshot waits only the remaining
+time; it does not reconfigure the meter.
+
+Use **Reapply measurement setup** after changing the meter's front-panel settings
+or resetting it. The app does not detect external/front-panel setup changes.
+This button reapplies the selected function and restarts the settling period.
+
+Automation waits for a connected Multicomp's first valid post-settling reading
+before executing instrument settings. The wait is recorded as `acquisition_wait`
+and `acquisition_ready` events. If no reading arrives within 75 seconds, the run
+fails before any sequence setting writes. This does not certify measurement
+accuracy or compensate for an insufficient settling delay.

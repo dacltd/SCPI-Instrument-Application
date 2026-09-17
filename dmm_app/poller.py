@@ -52,6 +52,9 @@ class PollingWorker(threading.Thread):
         on_reading: Callable[[Reading], None],
         on_error: Callable[[str], None],
         start_gate: threading.Event | None = None,
+        initial_delay_seconds: float = 0.0,
+        single_shot: bool = False,
+        on_complete: Callable[[str], None] | None = None,
     ):
         super().__init__(daemon=True)
         self._scpi = scpi
@@ -66,20 +69,33 @@ class PollingWorker(threading.Thread):
         self._on_error = on_error
         self._start_gate = start_gate
         self._stop_event = threading.Event()
+        if not math.isfinite(initial_delay_seconds) or initial_delay_seconds < 0:
+            raise ValueError("Initial settling delay must be finite and nonnegative")
+        self._initial_delay_seconds = initial_delay_seconds
+        self._single_shot = single_shot
+        self._on_complete = on_complete
+        self.ready = threading.Event()
 
     def stop(self) -> None:
         self._stop_event.set()
 
     def run(self) -> None:
         if self._start_gate is not None:
-            self._start_gate.wait()
+            while not self._start_gate.wait(.1):
+                if self._stop_event.is_set():
+                    return
+        if self._stop_event.wait(self._initial_delay_seconds):
+            return
         while not self._stop_event.is_set():
             started = time.monotonic()
             try:
+                cycle_valid = True
                 for measurement in self._measurements:
                     if self._stop_event.is_set():
                         break
                     raw = self._scpi.query(measurement.query_command)
+                    if self._stop_event.is_set():
+                        return
                     timestamp, elapsed_seconds, acquisition_run = self._clock.capture()
                     reading = Reading(
                         timestamp=timestamp,
@@ -96,11 +112,20 @@ class PollingWorker(threading.Thread):
                         value=scaled_primary_value(raw, measurement.value_scale),
                         unit=measurement.unit,
                     )
+                    cycle_valid = cycle_valid and reading.value is not None
                     self._on_reading(reading)
             except Exception as exc:  # pragma: no cover - hardware error path
                 self._on_error(str(exc))
                 return
 
+            if self._stop_event.is_set():
+                return
+            if cycle_valid:
+                self.ready.set()
+            if self._single_shot:
+                if self._on_complete:
+                    self._on_complete("Snapshot complete.")
+                return
             elapsed = time.monotonic() - started
             remaining = self._interval_seconds - elapsed
             if remaining > 0:

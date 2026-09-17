@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from dmm_app.automation import ACTIONS, InstrumentController, SequenceRunner, load_sequence, validate_sequence
 from dmm_app.models import InstrumentType
+from dmm_app.poller import PollingWorker
 
 MODEL_PROFILES = {'owon_spe6103': InstrumentType.OWON_SPE6103,
                   'keithley_2281s': InstrumentType.KEITHLEY_2281S}
@@ -394,7 +395,10 @@ class AutomationTab(QWidget):
                 started.append(panel)
             self.panels = connected
             self.runner = SequenceRunner(document, controllers, self.window._clock, run_dir / 'events.jsonl',
-                                         lambda data: self.window._enqueue_event('automation', -1, data))
+                                         lambda data: self.window._enqueue_event('automation', -1, data),
+                                         ready_events=[p._worker.ready for p in connected
+                                                       if p._selected_instrument() == InstrumentType.MP730889
+                                                       and isinstance(p._worker, PollingWorker)])
             self.history.clear()
             self.history.append(f'Capture folder: {run_dir}')
             self.paused = False
