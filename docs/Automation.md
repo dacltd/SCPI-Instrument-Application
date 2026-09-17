@@ -25,12 +25,13 @@ conditional transitions are future extensions of the same format.
 4. Open **Automation → Load example → USB capture check**. Review the steps
    and **Setup** assignments. Double-click a cell to edit it. Role/action and
    output/method values have dropdowns. Numerical values use V, A, % and seconds.
-   The supplied current limits are assumptions to review, not measured limits:
+   The OWON startup/recovery limit is 3 A as requested. Battery current limits remain
+   assumptions to review, not measured limits:
 
    | Setting | Initial example value |
    | --- | --- |
    | OWON external voltage | **10 V**, confirmed by the operator |
-   | OWON source current limit | **0.5 A** |
+   | OWON source current limit | **3 A** at startup/recovery, as requested for inrush headroom |
    | 2281S discharge current limit | **2 A** |
    | 2281S current protection | **2.5 A** |
    | 2281S terminal voltage protection | **4.25 V** for the deployed 4.20 V charger |
@@ -50,7 +51,7 @@ conditional transitions are future extensions of the same format.
    **Battery policy plateaus** example. Save any edited sequence for reuse.
 
 The USB example has 390 seconds (6.5 minutes) of dwell, plus command time.
-The longer example has 2,340 seconds (39 minutes) of dwell, plus command time.
+The longer example has 2,415 seconds (40.25 minutes) of dwell, plus command time.
 Times are provisional: the initial boot holds for 30 seconds then captures for
 60 seconds; subsequent plateaus settle for 15 seconds then capture for 60.
 Extend these where drift/noise indicates they are too short. A time delay does
@@ -124,7 +125,7 @@ Acquisition may wait briefly while that group completes.
 
 The longer example covers battery VOC points 3.10, 3.20, 3.40, 3.50, 3.80 and
 3.95 V with external power and battery-only; a 10 V source-current-limit ladder
-from 0.5 A down to 0.01 A; and a live upstream input sweep through 3–10 V.
+from 0.5 A down to 0.01 A, with 3 A startup/recovery; and a live upstream input sweep through 3–10 V.
 It includes source insertion/removal and returns to a 3.8 V battery-only state.
 
 Source current limits are **not requested battery currents**. Use the calibrated
@@ -220,3 +221,59 @@ or harmless condition. The app records the returned error and fails the run; it
 does not issue a blanket clear/reset, change VLOW, or automatically retry.
 Review the instrument's error/event log and resolve its reported condition before
 retrying. Further queued errors can still block the next attempt.
+
+### Read-back acceptance windows (0.4.3)
+
+**Automation → Setup → Read-back ±** sets an absolute tolerance for each numerical
+setting, in that setting's units (V, A, or percentage points for SOC). It checks
+the SCPI **setting read-back**, not measured terminal voltage/current. The actual
+read-back must satisfy both `abs(actual - requested) <= tolerance` and the test's
+allowed minimum/maximum; tolerance never widens those bounds. Output and method
+states still require exact matches. Changing a tolerance resets setup review.
+
+The default 2281S `voltage_protection` tolerance is now **±0.05 V**, accepting the
+observed request 4.25 V / read-back 4.2 V within the example's 4.2–4.3 V bounds.
+It is a targeted acceptance window for this observed read-back, not a claim about
+the hardware trip threshold or every firmware version's rounding algorithm.
+The [2281S datasheet](https://download.tek.com/datasheet/1KW-60206-0_2281S_Datasheet_050119.pdf),
+page 8, lists OVP resolution of 125 mV and setting accuracy ±(0.25% + 0.25 V).
+Thus a 4.2 V read-back does not guarantee a trip at precisely 4.2 V, nor does a
+successful read-back establish sufficient charger headroom. Verify behaviour on
+the bench. Other defaults remain unchanged, including VOC **±0.005 V**.
+
+Both bundled examples explicitly specify the protection tolerance. Older JSON
+files without a tolerance use the displayed defaults; explicitly saved values
+are respected. Optional role-level format:
+
+```json
+"readback_tolerances": {"voltage_protection": 0.05, "voc": 0.005}
+```
+
+Only bounded numerical actions accept tolerances. Values must be finite,
+nonnegative numbers (zero means exact numerical equality); unknown actions,
+boolean values, and tolerances beyond the device's numerical span are rejected.
+The executed `sequence.json` records effective tolerances including defaults.
+Each successful numerical command event records `requested`, `readback`, signed
+`difference`, `tolerance`, `allowed_min` and `allowed_max`. Failures display the
+requested/actual values and acceptance window. An instrument-reported SCPI error
+still fails the command regardless of numerical tolerance.
+
+#### Per-step overrides
+
+The **Sequence** table also has **Read-back ±**. Leave it **blank** to inherit the
+instrument setting's default from Setup. Enter a number to override it **for that
+step only**; `0` means exact numerical equality. Overrides move with their steps
+and survive save/load. They do not modify subsequent steps or relax test bounds.
+Output, method and hold steps must leave this column blank.
+
+In JSON, use optional `"readback_tolerance": 0.05` in the step object. The
+protection-setting step in both bundled examples explicitly uses `0.05` V.
+Effective tolerance and `tolerance_source` (`step` or `instrument`) are recorded
+in command-complete events, including the requested value and actual read-back.
+The executed script preserves every step override as well as effective instrument
+defaults. Existing scripts without this field continue to load.
+
+The bundled sequences allow OWON current limits up to **3 A** and set 3 A before
+external output enable and on source recovery. Saved custom files retain their
+own bounds and steps: reload an updated example, or set the source current-limit
+maximum to 3 A in Setup and edit the startup/recovery steps to 3 A.

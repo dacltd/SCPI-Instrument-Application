@@ -68,6 +68,11 @@ def main() -> int:
                         "dmm_settling_seconds": panel._settling_input.value(),
                         "dmm_reapply_button": panel._dmm_reapply.text(),
                         "automation_example_steps": automation_example_steps,
+                        "automation_step_columns": window._automation.steps.columnCount(),
+                        "automation_protection_tolerance": next(
+                            s["readback_tolerance"] for s in window._automation.edited_document()["steps"]
+                            if s["action"] == "voltage_protection"
+                        ),
                         "overview_tab": window._tabs.tabText(0),
                         "instrument_pages": panel._detail_tabs.count(),
                         "workspace_tabs": window._tabs.count(),

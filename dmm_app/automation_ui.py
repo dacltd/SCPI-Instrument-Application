@@ -107,7 +107,7 @@ class AutomationTab(QWidget):
         self.name = QLineEdit()
         self.name.setPlaceholderText('Sequence name')
         sequence_layout.addWidget(self.name)
-        self.steps = self.table(('Step / purpose', 'Instrument role', 'Action', 'Value', 'Settle (s)', 'Capture (s)'))
+        self.steps = self.table(('Step / purpose', 'Instrument role', 'Action', 'Value', 'Settle (s)', 'Capture (s)', 'Read-back ±'))
         self.steps.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.steps.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.steps.setWordWrap(False)
@@ -123,7 +123,7 @@ class AutomationTab(QWidget):
         edit_row.addStretch()
         sequence_layout.addLayout(edit_row)
         hint = QLabel('Each step sends one action, checks read-back, then settles and captures. '
-                      'All readings are logged throughout. Times are relative to command completion.')
+                      'All readings are logged throughout. Blank Read-back ± uses the Setup default; a number overrides it for that step.')
         hint.setWordWrap(True)
         sequence_layout.addWidget(hint)
         self.pages.addTab(sequence_page, 'Sequence')
@@ -136,8 +136,8 @@ class AutomationTab(QWidget):
         refresh = QPushButton('Refresh instrument assignments')
         refresh.clicked.connect(self.refresh_assignments)
         setup_layout.addWidget(refresh)
-        self.limits = self.table(('Instrument role', 'Setting', 'Minimum', 'Maximum'))
-        setup_layout.addWidget(QLabel('Allowed settings for this test'))
+        self.limits = self.table(('Instrument role', 'Setting', 'Minimum', 'Maximum', 'Read-back ±'))
+        setup_layout.addWidget(QLabel('Allowed settings and absolute read-back tolerance (V, A or % for SOC)'))
         setup_layout.addWidget(self.limits, 1)
         self.endings = self.table(('Instrument role', 'On completion', 'On abort / error'))
         self.endings.setMaximumHeight(130)
@@ -200,6 +200,9 @@ class AutomationTab(QWidget):
             item = QTableWidgetItem(text)
             item.setToolTip(text)
             self.steps.setItem(row, column, item)
+        tolerance = QTableWidgetItem(str(step['readback_tolerance']) if 'readback_tolerance' in step else '')
+        tolerance.setToolTip('Blank: use Setup default. Number: absolute tolerance for this step in V, A or %; 0 requires exact equality.')
+        self.steps.setItem(row, 6, tolerance)
 
     def set_document(self, document):
         if self.active:
@@ -216,7 +219,8 @@ class AutomationTab(QWidget):
             for action, bounds in config['limits'].items():
                 row = self.limits.rowCount()
                 self.limits.insertRow(row)
-                for column, value in enumerate((role, action, *bounds)):
+                tolerance = config.get('readback_tolerances', {}).get(action, ACTIONS[config['model']][action][2])
+                for column, value in enumerate((role, action, *bounds, tolerance)):
                     item = QTableWidgetItem(str(value))
                     if column < 2:
                         item.setFlags(item.flags() & ~Qt.ItemIsEditable)
@@ -272,10 +276,18 @@ class AutomationTab(QWidget):
             values = [self.steps.item(row, col).text() for col in range(len(STEP_FIELDS))]
             values[3] = json.loads(values[3])
             values[4:] = [float(value) for value in values[4:]]
-            document['steps'].append(dict(zip(STEP_FIELDS, values)))
+            step = dict(zip(STEP_FIELDS, values))
+            tolerance = self.steps.item(row, 6).text().strip()
+            if tolerance:
+                step['readback_tolerance'] = float(tolerance)
+            document['steps'].append(step)
         for row in range(self.limits.rowCount()):
-            role, action, low, high = [self.limits.item(row, col).text() for col in range(4)]
-            document['instruments'][role]['limits'][action] = [float(low), float(high)]
+            role, action, low, high, tolerance = [self.limits.item(row, col).text() for col in range(5)]
+            config = document['instruments'][role]
+            config['limits'][action] = [float(low), float(high)]
+            value = float(tolerance)
+            if action in config.get('readback_tolerances', {}) or value != ACTIONS[config['model']][action][2]:
+                config.setdefault('readback_tolerances', {})[action] = value
         # Preserve declared cleanup ordering (which may differ from role order).
         for row in range(self.endings.rowCount()):
             role = self.endings.item(row, 0).text()
@@ -345,6 +357,10 @@ class AutomationTab(QWidget):
                 raise ValueError('On Run, enter the board/run notes and confirm the setup review.')
             if any(p.is_running or p.is_scope_tools_busy for p in self.window._panels):
                 raise ValueError('Stop the previous capture using Stop capture (or Stop all acquisition), then start again. Automation starts a new shared capture.')
+            for config in document['instruments'].values():
+                tolerances = config.setdefault('readback_tolerances', {})
+                for action in config['limits']:
+                    tolerances.setdefault(action, ACTIONS[config['model']][action][2])
             controllers, assignments = {}, {}
             for role, combo in self.assignments.items():
                 index = combo.currentData()

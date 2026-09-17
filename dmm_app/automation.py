@@ -24,7 +24,7 @@ ACTIONS = {
         "soc": (":BATTery:SIMulator:SOC", (0, 100), .05),
         "current_limit": (":BATTery:SIMulator:CURRent:LIMit", (0, 6.1), .002),
         "current_protection": (":BATTery:SIMulator:CURRent:PROTection", (.1, 6.1), .002),
-        "voltage_protection": (":BATTery:SIMulator:TVOLtage:PROTection", (.5, 21), .005),
+        "voltage_protection": (":BATTery:SIMulator:TVOLtage:PROTection", (.5, 21), .05),
         "method": (":BATTery:SIMulator:METHod", None, 0),
         "output": (":BATTery:OUTPut", None, 0),
     },
@@ -63,7 +63,7 @@ def validate_sequence(document):
     for role, config in roles.items():
         if not isinstance(role, str) or not re.fullmatch(r'[a-z][a-z0-9_]{0,31}', role):
             raise ValueError("Role names must use lowercase letters, digits and underscores")
-        keys(config, ('model', 'limits'))
+        keys(config, ('model', 'limits'), ('readback_tolerances',))
         model = config['model']
         if not isinstance(model, str) or model not in MODELS or not isinstance(config['limits'], dict):
             raise ValueError(f"Unsupported instrument or limits for {role}")
@@ -74,6 +74,14 @@ def validate_sequence(document):
             lo, hi = spec[1]
             number(bounds[0], action, lo, hi)
             number(bounds[1], action, bounds[0], hi)
+        tolerances = config.get('readback_tolerances', {})
+        if not isinstance(tolerances, dict):
+            raise ValueError(f"{role}.readback_tolerances must be an object")
+        for action, tolerance in tolerances.items():
+            spec = ACTIONS[model].get(action)
+            if not spec or spec[1] is None or action not in config['limits']:
+                raise ValueError(f"Read-back tolerance requires a bounded numerical setting: {role}.{action}")
+            number(tolerance, f'{role}.{action} tolerance', 0, spec[1][1] - spec[1][0])
 
     def validate_action(step, cleanup=False):
         keys(step, ('instrument', 'action', 'value'))
@@ -107,12 +115,17 @@ def validate_sequence(document):
     configured = {role: set() for role in roles}
     powered = {role: False for role in roles}
     for step in steps:
-        keys(step, ('label', 'instrument', 'action', 'value', 'settle_s', 'capture_s'))
+        keys(step, ('label', 'instrument', 'action', 'value', 'settle_s', 'capture_s'), ('readback_tolerance',))
         if not isinstance(step['label'], str) or not step['label'].strip():
             raise ValueError("Each step needs a label")
         validate_action({key: step[key] for key in ('instrument', 'action', 'value')})
         role, action = step['instrument'], step['action']
         model = roles[role]['model']
+        if 'readback_tolerance' in step:
+            spec = ACTIONS[model].get(action)
+            if not spec or spec[1] is None:
+                raise ValueError('Step read-back tolerance requires a numerical action')
+            number(step['readback_tolerance'], 'Step read-back tolerance', 0, spec[1][1] - spec[1][0])
         if action == 'output' and step['value']:
             required = {'voltage', 'current_limit'} if model == 'owon_spe6103' else {'voc', 'current_limit'}
             if not required <= configured[role]:
@@ -148,6 +161,8 @@ class InstrumentController:
         self.model = model
         self.scpi = scpi
         self.identity = ''
+        self.readback_tolerances = {}
+        self.allowed_limits = {}
 
     def query_number(self, command):
         response = self.scpi.query(command)
@@ -202,10 +217,15 @@ class InstrumentController:
                     "Review the instrument error/event log and resolve the condition before retrying."
                 )
 
-    def apply(self, action, value):
+    def apply(self, action, value, *, readback_tolerance=None):
         if action == 'hold':
             return {'action': 'hold', 'readback': 'unchanged; no command sent'}
-        command, _, tolerance = ACTIONS[self.model][action]
+        command, device_bounds, default_tolerance = ACTIONS[self.model][action]
+        tolerance = self.readback_tolerances.get(action, default_tolerance)
+        if readback_tolerance is not None:
+            if device_bounds is None:
+                raise ValueError('Step read-back tolerance requires a numerical action')
+            tolerance = number(readback_tolerance, 'Step read-back tolerance', 0, device_bounds[1] - device_bounds[0])
         with self.scpi.transaction():
             if self.model == 'keithley_2281s' and action in (
                 'current_limit', 'current_protection', 'voltage_protection', 'method'
@@ -225,10 +245,25 @@ class InstrumentController:
                 matches = actual in (value, value[:4] if value == 'static' else 'dyn')
             else:
                 actual = self.query_number(command + '?')
-                matches = math.isclose(actual, value, rel_tol=0, abs_tol=tolerance)
+                low, high = self.allowed_limits.get(action, device_bounds)
+                # Small arithmetic allowance only at the tolerance boundary, not
+                # at safety bounds. 4.25 - 4.2 must pass an explicit 0.05 window.
+                difference = abs(actual - value)
+                matches = (low <= actual <= high and
+                           (difference <= tolerance or
+                            (tolerance > 0 and math.isclose(difference, tolerance, rel_tol=0, abs_tol=1e-12))))
+                if not matches:
+                    raise ValueError(
+                        f'{command}: requested {value}, read back {actual}; '
+                        f'allowed ±{tolerance:g}, constrained to [{low:g}, {high:g}]'
+                    )
             if not matches:
                 raise ValueError(f'{command}: requested {value}, read back {actual}')
-            return {'command': f'{command} {parameter}', 'readback': actual}
+            result = {'command': f'{command} {parameter}', 'requested': value, 'readback': actual}
+            if device_bounds is not None:
+                result.update(tolerance=tolerance, tolerance_source='step' if readback_tolerance is not None else 'instrument', difference=actual - value,
+                              allowed_min=low, allowed_max=high)
+            return result
 
 
 class SequenceAborted(Exception):
@@ -246,6 +281,9 @@ class SequenceRunner(threading.Thread):
         for role, controller in controllers.items():
             if controller.model != self.document['instruments'][role]['model']:
                 raise ValueError(f'Wrong instrument model for {role}')
+            config = self.document['instruments'][role]
+            controller.readback_tolerances = copy.deepcopy(config.get('readback_tolerances', {}))
+            controller.allowed_limits = copy.deepcopy(config['limits'])
         self.ready_events = tuple(ready_events)
         self.ready_timeout_seconds = number(ready_timeout_seconds, "Ready timeout", .01, 3600)
         self.controllers = controllers
@@ -339,7 +377,9 @@ class SequenceRunner(threading.Thread):
                 self.checkpoint()
                 self.emit('command_start', step=index, **step)
                 self.checkpoint()
-                result = self.controllers[step['instrument']].apply(step['action'], step['value'])
+                options = ({'readback_tolerance': step['readback_tolerance']}
+                           if 'readback_tolerance' in step else {})
+                result = self.controllers[step['instrument']].apply(step['action'], step['value'], **options)
                 self.emit('command_complete', step=index, instrument=step['instrument'], **result)
                 self.dwell('settle', step['settle_s'], index)
                 self.dwell('capture', step['capture_s'], index)

@@ -38,7 +38,7 @@ class FakeController:
     def preflight(self, steps):
         return {'identity': self.model, 'output': False}
 
-    def apply(self, action, value):
+    def apply(self, action, value, **options):
         self.calls.append((action, value))
         return {'readback': value}
 
@@ -341,10 +341,10 @@ def test_completion_cleanup_failure_also_attempts_abort_plan(document, tmp_path)
                                dict(instrument='battery', action='output', value=False)]
     runner, controllers, events = runner_for(document, tmp_path)
     original = controllers['battery'].apply
-    def failed_battery_off(action, value):
+    def failed_battery_off(action, value, **options):
         if action == 'output' and value is False:
             raise OSError('battery USB lost')
-        return original(action, value)
+        return original(action, value, **options)
     controllers['battery'].apply = failed_battery_off
     runner.run()
     assert runner.result == 'failed'
@@ -532,3 +532,134 @@ def test_preflight_reports_new_error_after_read_only_checks():
     with pytest.raises(ValueError, match='after read-only preflight checks'):
         InstrumentController('keithley_2281s', client).preflight([])
     client.write.assert_not_called()
+
+
+def protection_controller(actual):
+    client = scpi_mock({':BATTery:OUTPut?':'0', ':SYSTem:ERRor?':'0,"No error"',
+                       ':BATTery:SIMulator:TVOLtage:PROTection?':str(actual)})
+    controller = InstrumentController('keithley_2281s', client)
+    controller.allowed_limits = {'voltage_protection':[4.2,4.3]}
+    return controller
+
+
+@pytest.mark.parametrize('actual', [4.2, 4.25, 4.3])
+def test_protection_readback_window_inclusive_and_logged(actual):
+    result = protection_controller(actual).apply('voltage_protection', 4.25)
+    assert result['requested'] == 4.25
+    assert result['readback'] == actual
+    assert result['tolerance'] == .05
+    assert result['allowed_min'] == 4.2
+    assert result['allowed_max'] == 4.3
+
+
+@pytest.mark.parametrize('actual', [4.19999, 4.30001, 4.1, 4.4])
+def test_tolerance_never_overrides_test_bounds(actual):
+    controller = protection_controller(actual)
+    controller.readback_tolerances = {'voltage_protection':.2}
+    with pytest.raises(ValueError, match='constrained to'):
+        controller.apply('voltage_protection', 4.25)
+
+
+def test_explicit_tight_window_rejects_quantized_readback():
+    controller = protection_controller(4.2)
+    controller.readback_tolerances = {'voltage_protection':.005}
+    with pytest.raises(ValueError, match='allowed ±0.005'):
+        controller.apply('voltage_protection', 4.25)
+
+
+def test_voc_tolerance_is_not_widened():
+    client = scpi_mock({':SYSTem:ERRor?':'0,"No error"', ':BATTery:SIMulator:VOC?':'3.8'})
+    with pytest.raises(ValueError, match='allowed ±0.005'):
+        InstrumentController('keithley_2281s', client).apply('voc',3.85)
+
+
+@pytest.mark.parametrize('tolerances', [{'voltage_protection':-1}, {'voltage_protection':True},
+    {'voltage_protection':float('nan')}, {'voltage_protection':float('inf')},
+    {'voltage_protection':21}, {'output':.1}, {'unknown':1}, [], {'soc':.1}])
+def test_invalid_readback_tolerances_rejected(document, tolerances):
+    document['instruments']['battery']['readback_tolerances'] = tolerances
+    with pytest.raises(ValueError):
+        validate_sequence(document)
+
+
+def test_tolerance_editor_saves_and_invalidates_review(window, document):
+    tab=window._automation
+    tab.set_document(document)
+    row=next(r for r in range(tab.limits.rowCount()) if tab.limits.item(r,1).text()=='voltage_protection')
+    assert float(tab.limits.item(row,4).text()) == .05
+    tab.reviewed.setChecked(True)
+    tab.limits.item(row,4).setText('0.025')
+    assert not tab.reviewed.isChecked()
+    edited=tab.edited_document()
+    assert edited['instruments']['battery']['readback_tolerances']['voltage_protection']==.025
+    tab.set_document(edited)
+    assert tab.edited_document()==edited
+
+
+def test_old_sequences_keep_loading_with_visible_default(window, document):
+    document['instruments']['battery'].pop('readback_tolerances')
+    tab=window._automation
+    tab.set_document(document)
+    assert tab.edited_document()==document
+    row=next(r for r in range(tab.limits.rowCount()) if tab.limits.item(r,1).text()=='voltage_protection')
+    assert float(tab.limits.item(row,4).text())==.05
+
+
+def test_runner_uses_script_tolerance_and_preserves_document(document, tmp_path):
+    document['instruments']['battery']['readback_tolerances']['voltage_protection']=.025
+    runner, controllers, events=runner_for(fast(document),tmp_path)
+    assert controllers['battery'].readback_tolerances['voltage_protection']==.025
+    assert controllers['battery'].allowed_limits['voltage_protection']==[4.2,4.3]
+    controllers['battery'].readback_tolerances['voltage_protection']=.1
+    assert runner.document['instruments']['battery']['readback_tolerances']['voltage_protection']==.025
+
+
+def test_step_tolerance_overrides_instrument_and_does_not_leak():
+    controller=protection_controller(4.2)
+    controller.readback_tolerances={'voltage_protection':.005}
+    result=controller.apply('voltage_protection',4.25,readback_tolerance=.05)
+    assert result['tolerance_source']=='step'
+    assert result['tolerance']==.05
+    with pytest.raises(ValueError,match='allowed ±0.005'):
+        controller.apply('voltage_protection',4.25)
+    with pytest.raises(ValueError,match='allowed ±0'):
+        controller.apply('voltage_protection',4.25,readback_tolerance=0)
+
+
+def test_step_editor_override_roundtrip_move_and_blank_inheritance(window, document):
+    tab=window._automation
+    tab.set_document(document)
+    tab.reviewed.setChecked(True)
+    tab.steps.item(0,6).setText('0.02')
+    assert not tab.reviewed.isChecked()
+    assert tab.edited_document()['steps'][0]['readback_tolerance']==.02
+    tab.steps.selectRow(0)
+    tab.move_step(1)
+    assert tab.edited_document()['steps'][1]['readback_tolerance']==.02
+    tab.steps.item(1,6).setText('')
+    assert 'readback_tolerance' not in tab.edited_document()['steps'][1]
+
+
+@pytest.mark.parametrize('value', [-.1, True, None, float('nan'), float('inf'), '0.05'])
+def test_invalid_step_tolerance(document,value):
+    document['steps'][0]['readback_tolerance']=value
+    with pytest.raises(ValueError):
+        validate_sequence(document)
+
+
+def test_non_numeric_step_rejects_tolerance(document):
+    document['steps'][7]['readback_tolerance']=.1
+    with pytest.raises(ValueError,match='numerical action'):
+        validate_sequence(document)
+
+
+def test_runner_passes_only_explicit_step_override(document,tmp_path):
+    document=fast(document)
+    document['steps'][0]['readback_tolerance']=.015
+    runner,controllers,events=runner_for(document,tmp_path)
+    controllers['source'].apply=Mock(return_value={'readback':10})
+    runner.run()
+    assert runner.result=='complete'
+    calls=controllers['source'].apply.call_args_list
+    assert calls[0].kwargs=={'readback_tolerance':.015}
+    assert calls[1].kwargs=={}

@@ -521,3 +521,17 @@ retain post-test logging with a **Stop capture** button on Automation. Stop it
 before starting another sequence. This control stops acquisition, and during an
 active sequence requests abort/cleanup first; stopping capture alone does not
 turn instrument outputs off. Failure and cleanup details remain visible.
+
+## Automation read-back tolerances (0.4.3)
+
+In **Automation → Setup**, the **Read-back ±** column controls how close an
+instrument's setting read-back must be to the requested value. It uses V/A/%
+according to the setting and does not relax the allowed minimum/maximum.
+2281S voltage-protection read-back defaults to ±0.05 V; battery VOC remains
+±0.005 V. Tolerances are saved with the sequence and recorded in run evidence.
+See [read-back acceptance windows](Automation.md#read-back-acceptance-windows-043).
+
+Each **Sequence** step also has an optional **Read-back ±** cell: blank inherits
+Setup; a number overrides the tolerance for that step only. The protection step
+in the bundled examples uses **0.05 V** explicitly. Step overrides are saved in
+the JSON and recorded with each command result.

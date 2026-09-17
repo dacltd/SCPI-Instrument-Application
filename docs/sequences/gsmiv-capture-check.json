@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "GSMIV \u2014 USB capture and source transition check (10 V)",
-  "notes": "Connect OWON only to the upstream external input and 2281S only to BAT; disconnect the real battery. Use m5stack-fire-power-validation (awake), USB telemetry at 115200, and start with both outputs off. 10 V is the operator-confirmed external voltage. Source 0.5 A, battery discharge 2 A and protection 2.5 A are editable starting assumptions, not confirmed bench limits. Review wiring and these values before running. Select a suitable 2281S battery model in simulator mode with range covering 3.10\u20133.95 V; retain its model resistance and record it. This sequence selects STATIC simulation. VOC is not loaded terminal VBAT. 15 s settle/60 s capture are provisional; inspect drift and extend as needed. Logging continues during all phases. End/abort attempts source OFF and leaves the battery in its current state; it does not guarantee power if communication or instrument protection fails. Pause holds settings and continues logging. DMM/shunt references and oscilloscope remain required for formal qualification. First-run connection and polarity check; this is not release qualification.",
+  "notes": "Connect OWON only to the upstream external input and 2281S only to BAT; disconnect the real battery. Use m5stack-fire-power-validation (awake), USB telemetry at 115200, and start with both outputs off. 10 V is the operator-confirmed external voltage. The external source uses the operator-requested 3 A startup/recovery limit. Battery discharge 2 A and protection 2.5 A remain editable starting assumptions, not confirmed bench limits. Review wiring and these values before running. Select a suitable 2281S battery model in simulator mode with range covering 3.10\u20133.95 V; retain its model resistance and record it. This sequence selects STATIC simulation. VOC is not loaded terminal VBAT. 15 s settle/60 s capture are provisional; inspect drift and extend as needed. Logging continues during all phases. End/abort attempts source OFF and leaves the battery in its current state; it does not guarantee power if communication or instrument protection fails. Pause holds settings and continues logging. DMM/shunt references and oscilloscope remain required for formal qualification. First-run connection and polarity check; this is not release qualification.",
   "required_observers": [
     "gsmiv_power"
   ],
@@ -15,7 +15,7 @@
         ],
         "current_limit": [
           0.01,
-          0.5
+          3
         ]
       }
     },
@@ -38,6 +38,9 @@
           4.2,
           4.3
         ]
+      },
+      "readback_tolerances": {
+        "voltage_protection": 0.05
       }
     }
   },
@@ -51,10 +54,10 @@
       "capture_s": 0
     },
     {
-      "label": "External current limit \u2014 review 0.5 A starting value",
+      "label": "External startup current limit \u2014 3 A for inrush headroom",
       "instrument": "source",
       "action": "current_limit",
-      "value": 0.5,
+      "value": 3,
       "settle_s": 0,
       "capture_s": 0
     },
@@ -88,7 +91,8 @@
       "action": "voltage_protection",
       "value": 4.25,
       "settle_s": 0,
-      "capture_s": 0
+      "capture_s": 0,
+      "readback_tolerance": 0.05
     },
     {
       "label": "Initial battery operating point",
@@ -123,10 +127,10 @@
       "capture_s": 60
     },
     {
-      "label": "Restore source limit",
+      "label": "Restore source limit to 3 A",
       "instrument": "source",
       "action": "current_limit",
-      "value": 0.5,
+      "value": 3,
       "settle_s": 15,
       "capture_s": 60
     },
