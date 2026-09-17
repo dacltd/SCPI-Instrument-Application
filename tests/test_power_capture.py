@@ -124,7 +124,8 @@ class PowerCaptureTests(unittest.TestCase):
         chunks = iter((b"[POWER_BENCH],broken\n", telemetry().encode() + b"\n"))
         class Transport:
             def read_until(self, _terminator):
-                try: return next(chunks)
+                try:
+                    return next(chunks)
                 except StopIteration:
                     worker.stop()
                     return b""

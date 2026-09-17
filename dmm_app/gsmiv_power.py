@@ -34,7 +34,9 @@ def parse_sample(line: str) -> dict | None:
     if row["vext_valid"] and not row["vext_min"] <= row["vext_median"] <= row["vext_max"]:
         raise ValueError("invalid VEXT burst ordering")
     row.update({key: "" for key in DERIVED})
-    read_ok = lambda bit: bool(row["read_mask"] & (1 << bit))
+    def read_ok(bit):
+        return bool(row["read_mask"] & (1 << bit))
+
     row["ibat_validity"] = "read_error"
     if read_ok(6):
         field = row["ibat_raw"] >> 2
