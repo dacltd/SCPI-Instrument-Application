@@ -75,8 +75,14 @@ The runner never skips settling to catch up to an absolute schedule.
   close the window again after cleanup finishes.
 - **Stop all acquisition** during automation requests abort first and stops
   acquisition after cleanup. Outside automation it only stops acquisition.
-- Completion and ordinary abort leave acquisition running for post-test evidence.
-  Stop it manually when finished.
+- Successful completion leaves acquisition running for post-test evidence. Use
+  **Stop capture** on Automation before starting another run.
+- Failed or aborted sequences automatically stop their capture after cleanup,
+  including failures during preflight. Controls stay locked until pending
+  instrument reads finish. The status retains the failure and cleanup details,
+  then reports **Capture stopped** when a new run can be started.
+- **Stop capture** during a sequence requests abort and waits for cleanup first.
+  Stopping capture itself does not change instrument outputs.
 
 Both supplied sequences attempt **OWON output OFF**, then **leave the battery
 unchanged**, on completion or abort. The longer sequence returns battery VOC to
@@ -195,3 +201,22 @@ before starting instrument settings; lack of readiness times out after 75 second
 No DMM readings are captured during that initial settling wait. See the
 [Multicomp settling instructions](UserGuide.md#multicomp-snapshots-and-settling-041)
 for front-panel changes and manual reapplication of the setup.
+
+### Failed-run recovery (0.4.2)
+
+For the reported 2281S error `723,"Not permitted with capacitor voltage > VLOW"`,
+the saved capture failed during preflight, before any sequence setting writes.
+Version 0.4.1 left acquisition running after that failure; **Stop all acquisition**
+is the recovery control in that version. Version 0.4.2 stops failed/aborted capture
+automatically and provides **Stop capture** for retained successful-run logging.
+
+The existing capture cannot identify the operation that originally generated 723.
+`SYSTem:ERRor?` reads and removes the oldest error queue entry (2281S reference
+manual section 7-166). Preflight now checks the error queue before its state/range
+queries, and again after them. The message distinguishes an already queued error
+(originating command unknown) from one found after those queries. Acquisition
+queries may already have run; an already queued error is not proof of a historical
+or harmless condition. The app records the returned error and fails the run; it
+does not issue a blanket clear/reset, change VLOW, or automatically retry.
+Review the instrument's error/event log and resolve its reported condition before
+retrying. Further queued errors can still block the next attempt.

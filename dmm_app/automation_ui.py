@@ -75,12 +75,15 @@ class AutomationTab(QWidget):
         self.assignments = {}
         self.paused = False
         self._run_end_seen = False
+        self._run_outcome = None
+        self._end_summary = ""
+        self._stopping_capture = False
         self._build_ui()
 
     @property
     def active(self):
         # Retain ownership until the worker is fully finished, including cleanup.
-        return self.runner is not None
+        return self.runner is not None or self._stopping_capture
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -169,7 +172,11 @@ class AutomationTab(QWidget):
         self.pause_button.clicked.connect(self.toggle_pause)
         self.abort_button = QPushButton('Abort sequence')
         self.abort_button.clicked.connect(self.abort)
-        for widget in (self.start_button, self.pause_button, self.abort_button):
+        self.stop_capture_button = QPushButton('Stop capture')
+        self.stop_capture_button.setToolTip('Stop measurement logging. During a sequence, abort and finish cleanup first.')
+        self.stop_capture_button.clicked.connect(self.stop_capture)
+        self.stop_capture_button.setEnabled(False)
+        for widget in (self.start_button, self.pause_button, self.abort_button, self.stop_capture_button):
             run_controls.addWidget(widget)
         layout.addLayout(run_controls)
         self.pause_button.setEnabled(False)
@@ -337,7 +344,7 @@ class AutomationTab(QWidget):
             if not self.reviewed.isChecked() or not self.run_notes.toPlainText().strip():
                 raise ValueError('On Run, enter the board/run notes and confirm the setup review.')
             if any(p.is_running or p.is_scope_tools_busy for p in self.window._panels):
-                raise ValueError('Stop existing acquisitions/tools first. Automation starts a new shared capture.')
+                raise ValueError('Stop the previous capture using Stop capture (or Stop all acquisition), then start again. Automation starts a new shared capture.')
             controllers, assignments = {}, {}
             for role, combo in self.assignments.items():
                 index = combo.currentData()
@@ -403,6 +410,8 @@ class AutomationTab(QWidget):
             self.history.append(f'Capture folder: {run_dir}')
             self.paused = False
             self._run_end_seen = False
+            self._run_outcome = None
+            self._end_summary = ""
             self.lock_controls(True)
             self.pages.setCurrentIndex(2)
             self.runner.start()
@@ -421,7 +430,8 @@ class AutomationTab(QWidget):
         for index in (0, 1):
             self.pages.widget(index).setEnabled(not locked)
         self.pause_button.setEnabled(locked)
-        self.abort_button.setEnabled(locked)
+        self.abort_button.setEnabled(locked and self.runner is not None)
+        self.stop_capture_button.setEnabled(locked or any(p.is_running for p in self.panels))
         for panel in self.window._panels:
             panel._automation_locked = locked
             panel._detail_tabs.widget(1).setEnabled(not locked)
@@ -452,20 +462,70 @@ class AutomationTab(QWidget):
                             json.dumps({k: v for k, v in data.items() if k not in ('timestamp', 'elapsed_seconds', 'acquisition_run', 'event')}))
         if data['event'] == 'run_end':
             self._run_end_seen = True
-            self.status.setText(f"Sequence {data['outcome']}. {data['detail']} "
-                                f"{'Cleanup errors: ' + '; '.join(data['cleanup_errors']) if data['cleanup_errors'] else ''} "
-                                'Acquisition continues; review output states before disconnecting.')
+            self._run_outcome = data['outcome']
+            self._end_summary = f"Sequence {data['outcome']}. {data['detail']} "
+            if data['cleanup_errors']:
+                self._end_summary += 'Cleanup errors: ' + '; '.join(data['cleanup_errors']) + '. '
+            if not data['cleanup_attempted']:
+                self._end_summary += 'No sequence settings were applied. '
+            self.status.setText(self._end_summary + 'Finishing run…')
+
+    def stop_capture(self):
+        if self.runner:
+            self.window._stop_after_automation = True
+            self.abort('Stop capture requested')
+            return
+        self._begin_capture_stop()
+
+    def _begin_capture_stop(self):
+        # Request every stop first, then let tick observe completion. Never drop
+        # worker/session ownership or block the UI waiting for a serial timeout.
+        self._stopping_capture = True
+        self.lock_controls(True)
+        self.pause_button.setEnabled(False)
+        self.abort_button.setEnabled(False)
+        self.stop_capture_button.setEnabled(False)
+        self.status.setText(self._end_summary + 'Stopping capture; waiting for pending instrument I/O…')
+        for panel in self.panels:
+            panel._stream_requested = False
+            panel._plot.set_stream_expected(False)
+            if panel._worker is not None:
+                panel._worker.stop()
+
+    def _capture_stopped(self):
+        for panel in self.panels:
+            panel.stop_acquisition(announce=False)
+        self._stopping_capture = False
+        self.lock_controls(False)
+        self.stop_capture_button.setEnabled(False)
+        self.status.setText(self._end_summary +
+                            'Capture stopped. Resolve any reported instrument error, review setup and start again. '
+                            'Stopping capture does not change instrument outputs.')
+        stamp, elapsed, run = self.window._clock.capture()
+        self.window._enqueue_event('automation', -1, dict(
+            timestamp=stamp.isoformat(timespec='microseconds'), elapsed_seconds=elapsed,
+            acquisition_run=run, event='capture_stopped'))
+        if self.window._stop_after_automation:
+            self.window._stop_after_automation = False
+            self.window._stop_all()
 
     def tick(self):
         if self.runner and not self.runner.is_alive() and self._run_end_seen:
             self.runner = None
-            self.lock_controls(False)
             self.pause_button.setText('Pause')
             self.reviewed.setChecked(False)
-            if self.window._stop_after_automation:
-                self.window._stop_after_automation = False
-                self.window._stop_all()
+            if self._run_outcome != 'complete' or self.window._stop_after_automation:
+                self._begin_capture_stop()
+            else:
+                self.lock_controls(False)
+                self.status.setText(self._end_summary +
+                                    'Capture continues. Use Stop capture before starting another sequence. '
+                                    'Review output states before disconnecting.')
         elif self.runner:
             for panel in self.panels:
                 if not panel.is_connected or not panel.is_running:
                     self.abort(f'Acquisition stopped on instrument {panel.instrument_index + 1}')
+        if self._stopping_capture and not any(p.is_running for p in self.panels):
+            self._capture_stopped()
+        elif not self.active:
+            self.stop_capture_button.setEnabled(any(p.is_running for p in self.panels))

@@ -169,6 +169,8 @@ class InstrumentController:
             expected = 'SPE6103' if self.model == 'owon_spe6103' else '2281S-20-6'
             if expected not in self.identity.upper():
                 raise ValueError(f"Expected {expected}; received {self.identity}")
+            if self.model == 'keithley_2281s':
+                self.check_errors('before preflight checks (already queued; originating command unknown)')
             if self.output_state():
                 raise ValueError(f"{expected}: turn output off before starting a sequence")
             snapshot = {'identity': self.identity, 'output': False}
@@ -182,10 +184,10 @@ class InstrumentController:
                 for step in steps:
                     if step['action'] == 'voc' and not lo <= step['value'] <= hi:
                         raise ValueError(f"VOC {step['value']} is outside selected model range {lo}–{hi} V")
-                self.check_errors()
+                self.check_errors('after read-only preflight checks')
             return snapshot
 
-    def check_errors(self):
+    def check_errors(self, context='after command'):
         # OWON's published command set has no SYST:ERR?; use setting read-back.
         if self.model == 'keithley_2281s':
             response = self.scpi.query(':SYSTem:ERRor?')
@@ -194,7 +196,11 @@ class InstrumentController:
             except ValueError as exc:
                 raise ValueError(f"Invalid error response: {response}") from exc
             if code:
-                raise ValueError(f"2281S error: {response}")
+                raise ValueError(
+                    f"2281S error {context}: {response}. "
+                    "The returned queue entry has been recorded and consumed by SYST:ERR?. "
+                    "Review the instrument error/event log and resolve the condition before retrying."
+                )
 
     def apply(self, action, value):
         if action == 'hold':

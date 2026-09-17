@@ -302,7 +302,7 @@ wheels = [
 
 [[package]]
 name = "scpi-lab-instrument-app"
-version = "0.4.1"
+version = "0.4.2"
 source = { editable = "." }
 dependencies = [
     { name = "pyserial", marker = "sys_platform == 'darwin' or sys_platform == 'win32'" },

@@ -401,3 +401,134 @@ def test_missing_dmm_readiness_times_out_without_mutations(document, tmp_path):
     assert runner.result == 'failed'
     assert not any(c.calls for c in controllers.values())
     assert not events[-1]['cleanup_attempted']
+
+
+@pytest.mark.parametrize('outcome', ['failed', 'aborted'])
+def test_unsuccessful_run_stops_capture_waits_for_workers_and_allows_restart(window, document, tmp_path, outcome):
+    tab = window._automation
+    tab.set_document(fast(document))
+    for profile, endpoint in ((InstrumentType.OWON_SPE6103, 'OWON'),
+                              (InstrumentType.KEITHLEY_2281S, '2281'),
+                              (InstrumentType.GSMIV_POWER, 'UART')):
+        panel = window.add_instrument(profile)
+        panel._transport = Mock(is_open=True)
+        panel._scpi = Mock()
+        panel._endpoint_combo.setCurrentText(endpoint)
+        panel._worker = Mock(is_alive=Mock(return_value=True))
+    tab.panels = window._panels[:3]
+    original_workers = [p._worker for p in tab.panels]
+    tab.runner = Mock(is_alive=Mock(return_value=False))
+    tab.handle_event(dict(event='run_end', elapsed_seconds=.203, outcome=outcome,
+                          detail='2281S error: 723', cleanup_errors=[], cleanup_attempted=False))
+    tab.tick()
+    assert tab.active
+    assert 'Stopping capture' in tab.status.text()
+    assert '723' in tab.status.text()
+    assert not tab.start_button.isEnabled()
+    for p, worker in zip(tab.panels, original_workers):
+        worker.stop.assert_called_once()
+        worker.join.assert_not_called()
+        assert p._worker is worker
+        assert p._automation_locked
+        p._scpi.write.assert_not_called()
+    # A delayed USB/serial read must finish before controls are unlocked.
+    for worker in original_workers:
+        worker.is_alive.return_value = False
+    tab.tick()
+    assert not tab.active
+    assert not any(p.is_running for p in tab.panels)
+    assert tab.start_button.isEnabled()
+    assert not tab.abort_button.isEnabled()
+    assert 'Capture stopped' in tab.status.text()
+    assert 'No sequence settings were applied' in tab.status.text()
+    tab.refresh_assignments()
+    tab.run_notes.setPlainText('Repeat after instrument condition resolved')
+    tab.reviewed.setChecked(True)
+    for panel in tab.panels:
+        def start(panel=panel, **kwargs):
+            panel._worker = Mock(is_alive=Mock(return_value=True))
+            return True
+        panel.start_acquisition = start
+    with patch('dmm_app.automation_ui.InstrumentController', side_effect=lambda model, scpi: FakeController(model)), \
+         patch('dmm_app.automation_ui.QFileDialog.getExistingDirectory', return_value=str(tmp_path)):
+        tab.start()
+    assert tab.runner is not None
+    tab.runner.join(2)
+    window._process_events()
+    assert not tab.active
+    for panel in tab.panels:
+        panel._worker = None
+
+
+def test_success_retains_capture_with_working_stop_button(window):
+    tab = window._automation
+    panel = window.add_instrument(InstrumentType.GSMIV_POWER)
+    panel._transport = Mock(is_open=True)
+    worker = Mock(is_alive=Mock(return_value=True))
+    panel._worker = worker
+    tab.panels = [panel]
+    tab.runner = Mock(is_alive=Mock(return_value=False))
+    tab.handle_event(dict(event='run_end', elapsed_seconds=1, outcome='complete', detail='',
+                          cleanup_errors=[], cleanup_attempted=True))
+    tab.tick()
+    assert not tab.active
+    worker.stop.assert_not_called()
+    assert tab.stop_capture_button.isEnabled()
+    assert 'Use Stop capture' in tab.status.text()
+    tab.stop_capture_button.click()
+    assert tab.active
+    worker.stop.assert_called_once()
+    assert panel._worker is worker
+    worker.is_alive.return_value = False
+    tab.tick()
+    assert not tab.active
+    assert panel._worker is None
+    assert 'Capture stopped' in tab.status.text()
+
+
+def test_stop_capture_during_sequence_defers_until_cleanup(window):
+    tab = window._automation
+    panel = window.add_instrument(InstrumentType.GSMIV_POWER)
+    worker = Mock(is_alive=Mock(return_value=True))
+    panel._worker = worker
+    tab.panels = [panel]
+    tab.runner = Mock(is_alive=Mock(return_value=True))
+    tab.stop_capture()
+    tab.runner.abort.assert_called_once()
+    worker.stop.assert_not_called()
+    assert window._stop_after_automation
+    tab.runner.is_alive.return_value = False
+    tab.handle_event(dict(event='run_end', elapsed_seconds=1, outcome='aborted', detail='',
+                          cleanup_errors=['source: read timeout'], cleanup_attempted=True))
+    tab.tick()
+    worker.stop.assert_called_once()
+    assert 'read timeout' in tab.status.text()
+    worker.is_alive.return_value = False
+    tab.tick()
+    assert not tab.active
+    assert not window._stop_after_automation
+    assert 'read timeout' in tab.status.text()
+
+
+def test_preflight_reports_existing_723_without_bypassing_or_writing():
+    client = scpi_mock({'*IDN?':'KEITHLEY,MODEL 2281S-20-6,4415314,01.08b',
+                        ':SYSTem:ERRor?':'723,"Not permitted with capacitor voltage > VLOW"'})
+    controller = InstrumentController('keithley_2281s', client)
+    with pytest.raises(ValueError, match='already queued') as error:
+        controller.preflight([])
+    assert '723' in str(error.value)
+    assert 'originating command unknown' in str(error.value)
+    assert [call.args[0] for call in client.query.call_args_list] == ['*IDN?', ':SYSTem:ERRor?']
+    client.write.assert_not_called()
+
+
+def test_preflight_reports_new_error_after_read_only_checks():
+    responses = {'*IDN?':'KEITHLEY,2281S-20-6', ':BATTery:OUTPut?':'0',
+                 ':ENTRy:FUNCtion?':'SIM', ':BATTery:SIMulator:VOC? MINimum':'3.1',
+                 ':BATTery:SIMulator:VOC? MAXimum':'4.2'}
+    errors = iter(['0,"No error"', '723,"Not permitted with capacitor voltage > VLOW"'])
+    client = scpi_mock(responses)
+    client.query.side_effect = lambda c: next(errors) if c == ':SYSTem:ERRor?' else responses[c]
+    with pytest.raises(ValueError, match='after read-only preflight checks'):
+        InstrumentController('keithley_2281s', client).preflight([])
+    client.write.assert_not_called()

@@ -1725,9 +1725,7 @@ class InstrumentPanel(QGroupBox):
         if self._worker and self._worker.is_alive():
             self._worker.stop()
             self._worker.join(timeout=1.5)
-            if isinstance(
-                self._worker, (PollingWorker, RepeatedWaveformCaptureWorker, PicoTC08Worker, BatteryModelDownloadWorker)
-            ) and self._worker.is_alive():
+            if self._worker.is_alive():
                 if announce:
                     operation = (
                         "waveform transfer"
@@ -1737,6 +1735,8 @@ class InstrumentPanel(QGroupBox):
                         else "measurement query"
                         if isinstance(self._worker, PollingWorker)
                         else "TC-08 conversion"
+                        if isinstance(self._worker, PicoTC08Worker)
+                        else "serial read"
                     )
                     self._append_output(f"Stop requested; waiting for the current {operation}.")
                 self._refresh_controls()

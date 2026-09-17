@@ -510,3 +510,14 @@ before executing instrument settings. The wait is recorded as `acquisition_wait`
 and `acquisition_ready` events. If no reading arrives within 75 seconds, the run
 fails before any sequence setting writes. This does not certify measurement
 accuracy or compensate for an insufficient settling delay.
+
+
+## Automation failure recovery (0.4.2)
+
+Failed and aborted runs now stop their measurement capture automatically after
+cleanup. Pending reads retain their connection ownership until they finish;
+the status shows **Stopping capture**, then **Capture stopped**. Successful runs
+retain post-test logging with a **Stop capture** button on Automation. Stop it
+before starting another sequence. This control stops acquisition, and during an
+active sequence requests abort/cleanup first; stopping capture alone does not
+turn instrument outputs off. Failure and cleanup details remain visible.

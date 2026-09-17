@@ -64,6 +64,7 @@ def main() -> int:
                     report = {
                         "version": __version__,
                         "automation_tab": window._tabs.tabText(1),
+                        "stop_capture_button": window._automation.stop_capture_button.text(),
                         "dmm_settling_seconds": panel._settling_input.value(),
                         "dmm_reapply_button": panel._dmm_reapply.text(),
                         "automation_example_steps": automation_example_steps,
